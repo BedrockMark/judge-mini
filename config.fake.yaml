@@ -1,0 +1,16 @@
+# Offline end-to-end check: fake judges, no API keys, no spend.
+dataset_dir: LLM-Judge-Bias-Dataset
+env_file: null
+results_dir: results_fake
+samples_per_bias: 20
+seed: 0
+concurrency: 32
+cr_repeats: 2
+
+providers:
+  fake: {protocol: fake}
+
+judges:
+  - {label: "Fake-A (low)",  provider: fake, model: fake-a, effort: low}
+  - {label: "Fake-A (high)", provider: fake, model: fake-a, effort: high}
+  - {label: "Fake-B",        provider: fake, model: fake-b, effort: null}
