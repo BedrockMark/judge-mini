@@ -49,6 +49,7 @@ Run `check` first, and start `run` with a small `samples_per_bias` (e.g. 5) as a
 | `concurrency` | Max simultaneous API calls |
 | `cr_repeats` | Times the unperturbed prompt is judged, for Consistency Rate (≥ 2) |
 | `max_tokens` | Per-response cap (thinking + answer) |
+| `log_dir` | Where log files go (default `<results_dir>/logs`); override per run with `--log-dir` |
 | `providers` | `name: {protocol: openai\|anthropic, base_url, api_key_env}`; any OpenAI-compatible endpoint works (use `token_param: max_tokens` if it needs it) |
 | `judges` | `{label, provider, model, effort, params?, color?}` — only these are ever called |
 | `biases` | `all` or a list of bias names |
@@ -96,6 +97,9 @@ judgebias/
   plot.py         3x4 figure
 tests/            pytest suite (no network)
 ```
+
+Every command also writes all log records (INFO and above, including warnings, errors and tracebacks) to
+`<log_dir>/<command>_<YYYYmmdd_HHMMSS>.log`, one file per invocation.
 
 Outputs go to `results/`: `summary.csv`, `bias_grid.png`, per-item `raw/<judge>/<bias>.jsonl`, and
 `cache/responses.jsonl`. Responses are cached by (provider, model, effort, params, prompt, repeat), so

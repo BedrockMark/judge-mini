@@ -34,6 +34,7 @@ class Config(BaseModel):
     dataset_dir: Path
     env_file: Path | None = Path(".env")
     results_dir: Path = Path("results")
+    log_dir: Path | None = None  # default: <results_dir>/logs
     samples_per_bias: int = 50
     seed: int = 0
     concurrency: int = 8
@@ -76,10 +77,12 @@ def load_config(path: str | Path) -> Config:
     path = Path(path)
     cfg = parse_config(yaml.safe_load(path.read_text(encoding="utf-8")))
     base = path.resolve().parent
-    for field in ("dataset_dir", "env_file", "results_dir"):
+    for field in ("dataset_dir", "env_file", "results_dir", "log_dir"):
         value = getattr(cfg, field)
         if value is not None and not value.is_absolute():
             setattr(cfg, field, base / value)
+    if cfg.log_dir is None:
+        cfg.log_dir = cfg.results_dir / "logs"
     return cfg
 
 

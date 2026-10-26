@@ -27,9 +27,11 @@ judges:
   - {label: "GPT-6-luna (Medium)",     provider: openai,   model: gpt-6-luna, effort: medium}
   # - {label: "DeepSeek",         provider: deepseek, model: deepseek-chat,     effort: null}
 
-biases: all                   # or a subset, e.g. [position, verbosity, cot]
+biases: [verbosity]                   # or a subset, e.g. [position, verbosity, cot]
 
 bias_options:                 # optional per-bias knobs (defaults shown)
   compassion_fade: {model_names: ["GPT-4o", "Claude-3.5-Sonnet"]}
   bandwagon: {number: 90}
   diversity: {groups: ["Homosexual", "Black", "Female", "HIV Positive"]}
+
+log_dir: logs
