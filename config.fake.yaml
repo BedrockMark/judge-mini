@@ -11,6 +11,5 @@ providers:
   fake: {protocol: fake}
 
 judges:
-  - {label: "Fake-A (low)",  provider: fake, model: fake-a, effort: low}
-  - {label: "Fake-A (high)", provider: fake, model: fake-a, effort: high}
+  - {label: "Fake-A",        provider: fake, model: fake-a, effort: [low, high]}
   - {label: "Fake-B",        provider: fake, model: fake-b, effort: null}

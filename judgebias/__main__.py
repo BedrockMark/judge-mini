@@ -11,7 +11,7 @@ from pathlib import Path
 
 from .check import run_check
 from .config import ConfigError, load_config
-from .plot import plot_summary
+from .plot import plot_all
 from .runner import latest_output_dir, merge_summaries, new_output_dir, run
 
 
@@ -62,8 +62,8 @@ def main(argv: list[str] | None = None) -> int:
             summary.to_csv(out_dir / "summary.csv", index=False)
             (out_dir / "sources.txt").write_text("".join(f"{d}\n" for d in sources), encoding="utf-8")
             logging.info("plotting %s -> %s", [d.name for d in sources], out_dir)
-        out = plot_summary(cfg, summary, out_dir / "bias_grid.png")
-        print(f"Wrote {out}")
+        for out in plot_all(cfg, summary, out_dir):
+            print(f"Wrote {out}")
         return 0
     except ConfigError as e:
         logging.error("Config error: %s", e)

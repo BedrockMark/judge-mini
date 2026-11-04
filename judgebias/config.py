@@ -7,7 +7,7 @@ from typing import Any, Literal
 
 import yaml
 from dotenv import load_dotenv
-from pydantic import BaseModel, Field, ValidationError, model_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 
 class ConfigError(ValueError):
@@ -29,6 +29,22 @@ class JudgeSpec(BaseModel):
     effort: str | None = None  # null = send no reasoning params
     color: str | None = None
     params: dict[str, Any] = Field(default_factory=dict)  # extra request params, passed through verbatim
+    group: str = ""  # config entry this judge came from; one entry with an effort list gives one group
+
+    @model_validator(mode="after")
+    def _default_group(self) -> "JudgeSpec":
+        self.group = self.group or self.label
+        return self
+
+
+def expand_efforts(raw: dict) -> list[dict]:
+    """`effort: [low, high]` -> one judge per effort, labelled "<label> (<effort>)", all in group <label>."""
+    efforts = raw.get("effort")
+    if not isinstance(efforts, list):
+        return [raw]
+    if not efforts:
+        raise ConfigError(f"Judge '{raw.get('label')}' has an empty effort list")
+    return [{**raw, "label": f"{raw.get('label')} ({e})", "effort": e, "group": raw.get("label")} for e in efforts]
 
 
 class Config(BaseModel):
@@ -45,6 +61,13 @@ class Config(BaseModel):
     judges: list[JudgeSpec]
     biases: Literal["all"] | list[str] = "all"
     bias_options: dict[str, dict[str, Any]] = Field(default_factory=dict)
+
+    @field_validator("judges", mode="before")
+    @classmethod
+    def _expand_efforts(cls, judges: Any) -> Any:
+        if not isinstance(judges, list):
+            return judges
+        return [x for j in judges for x in (expand_efforts(j) if isinstance(j, dict) else [j])]
 
     @model_validator(mode="after")
     def _check_refs(self) -> "Config":
@@ -85,6 +108,13 @@ def load_config(path: str | Path) -> Config:
     if cfg.log_dir is None:
         cfg.log_dir = cfg.results_dir / "logs"
     return cfg
+
+
+def require_dataset(cfg: Config) -> None:
+    """The dataset is a git submodule; a plain `git clone` leaves its folder empty."""
+    if not (cfg.dataset_dir / "promptTemplate.py").exists():
+        raise ConfigError(f"Dataset not found in {cfg.dataset_dir}; fetch the submodule with "
+                          "`git submodule update --init --remote`")
 
 
 def resolve_keys(cfg: Config) -> dict[str, str | None]:

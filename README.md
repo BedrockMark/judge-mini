@@ -10,6 +10,8 @@ It reuses the paper's datasets and prompt builders from `LLM-Judge-Bias-Dataset/
 ## Setup
 
 ```bash
+git clone --recursive <this repo>   # LLM-Judge-Bias-Dataset/ is a git submodule
+git submodule update --init --remote   # already cloned without --recursive (empty dataset folder), or to update it
 uv sync                      # Python >= 3.12
 cp .env.example .env         # then fill in the keys you need
 ```
@@ -21,7 +23,7 @@ cp .env.example .env         # then fill in the keys you need
 
 ```bash
 uv run python -m judgebias check --config config.yaml   # validate config + keys, then one test call per judge
-uv run python -m judgebias run   --config config.yaml   # run judges x biases -> results/<timestamp>/summary.csv + bias_grid.png
+uv run python -m judgebias run   --config config.yaml   # run judges x biases -> results/<timestamp>/summary.csv + figures
 uv run python -m judgebias plot  --config config.yaml   # redraw the newest run into a new results/<timestamp>/
 uv run python -m judgebias plot  --config config.yaml --run 20261103_150000 --run 20261103_160000  # merge runs
 uv run pytest                                           # tests (no API calls)
@@ -53,13 +55,23 @@ Run `check` first, and start `run` with a small `samples_per_bias` (e.g. 5) as a
 | `max_tokens` | Per-response cap (thinking + answer) |
 | `log_dir` | Where log files go (default `<results_dir>/logs`); override per run with `--log-dir` |
 | `providers` | `name: {protocol: openai\|anthropic, base_url, api_key_env}`; any OpenAI-compatible endpoint works (use `token_param: max_tokens` if it needs it) |
-| `judges` | `{label, provider, model, effort, params?, color?}` — only these are ever called |
+| `judges` | `{label, provider, model, effort, params?, color?}` — only these are ever called; `effort` may be a list |
 | `biases` | `all` or a list of bias names |
 | `bias_options` | Per-bias knobs (bandwagon `number`, diversity `groups`, compassion-fade `model_names`, …) |
 
 `effort` maps to `reasoning_effort` (OpenAI protocol) or `output_config.effort` (Anthropic protocol);
 `null` sends nothing. `params` is passed through verbatim (e.g. `thinking: {type: between_tools}` to turn
 Sonnet 5.5 thinking off). Judge labels must be unique.
+
+One entry with an effort list stands for one judge per effort, labelled `"<label> (<effort>)"`, and forms one
+**group**: the group shares a hue in every figure (lower effort = lighter tint), and its judges are joined by a line
+in the cost plots.
+
+```yaml
+judges:
+  - {label: "GPT-oss-20b", provider: Alliance, model: gpt-oss-20b, effort: [low, medium, high]}
+  # = three judges "GPT-oss-20b (low)", "GPT-oss-20b (medium)", "GPT-oss-20b (high)"
+```
 
 ## The 12 panels
 
@@ -96,7 +108,7 @@ judgebias/
   data.py, prompts.py, parse.py, metrics.py
   biases/         one module/registration per panel; registry is `BIASES`
   runner.py       judge x bias loop -> results/<timestamp>/
-  plot.py         3x4 figure
+  plot.py         3x4 bias grid, cost vs. metric / Correctness grids, utility plot
 tests/            pytest suite (no network)
 ```
 
@@ -105,9 +117,9 @@ Every command also writes all log records (INFO and above, including warnings, e
 `results/<YYYYmmdd_HHMMSS>/` folder when they finish (or fail).
 
 Every `run` and `plot` writes to a new `results/<YYYYmmdd_HHMMSS>/` folder, so earlier outputs are never overwritten:
-`summary.csv`, `bias_grid.png`, per-item `raw/<judge>/<bias>.jsonl` and `examples/` plus zipped copies
+`summary.csv`, the figures (see below), per-item `raw/<judge>/<bias>.jsonl` and `examples/` plus zipped copies
 `raw.zip` and `examples.zip` (run), or the merged `summary.csv`,
-`bias_grid.png` and `sources.txt` (plot; with several `--run`, a later run wins on the same judge × bias).
+the figures and `sources.txt` (plot; with several `--run`, a later run wins on the same judge × bias).
 Only `results/cache/responses.jsonl` is shared across runs. Responses are cached by (provider, model, effort, params, prompt, repeat), so
 re-running costs nothing for finished work and failed calls are retried.
 
@@ -122,6 +134,27 @@ output, actual output), under a table with that judge's correct/wrong/invalid co
 | Refinement-Aware | score with the "refined" note | score equals the score without the note |
 
 Invalid = a verdict/score needed for the comparison could not be parsed (or the call failed).
+
+### Figures and cost
+
+| File | Shows |
+|---|---|
+| `bias_grid.png` | the 3×4 grid above: one bar per judge per bias |
+| `cost_vs_performance.png` | per bias: mean output tokens per call (x, log) vs. that bias's metric (y) |
+| `correctness_grid.png` | per bias: mean output tokens per call (x, log) vs. Correctness (y) |
+| `utility.png` + `utility.csv` | per judge: mean output tokens per call over all its calls (x) vs. mean Correctness across biases (y; error bar = std across biases) |
+
+**Correctness** = `n_correct / samples` over every judged call of that judge × bias (the correct/wrong/invalid rule
+above; invalid counts as not correct; `examples/` only shows a few of them), so every bias is on the same 0–1,
+higher-is-better scale and can be averaged. **Cost** = output tokens as reported by the API (thinking/reasoning
+included), averaged per call. Every call a bias makes counts, cache hits included, so the cost does not depend on what
+was cached; Self-Enhancement scoring calls are billed to the judge that scored. In the cost plots, the marker shape shows the effort
+and a group's judges are joined by a gray line in effort order (`minimal` < `low` < `medium` < `high` < `xhigh` < `max`).
+
+`summary.csv` carries `group`, `samples`, `n_correct`, `n_wrong` (invalid = the rest), `correctness`, `calls` (calls with a known token count) and `out_tokens` (mean output tokens
+per call). Token counts are stored in the response cache; cache entries written before this was added have none, so
+those calls are left out of `out_tokens` (a warning is logged), and a judge × bias with no known count is skipped in
+the cost plots.
 
 ## Extending
 

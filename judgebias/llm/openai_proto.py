@@ -4,7 +4,7 @@ from typing import Any
 
 from openai import AsyncOpenAI
 
-from .base import ChatClient
+from .base import ChatClient, Completion
 
 
 class OpenAIProtocolClient(ChatClient):
@@ -14,7 +14,7 @@ class OpenAIProtocolClient(ChatClient):
         self._client = AsyncOpenAI(api_key=api_key, base_url=base_url, max_retries=4, timeout=600)
         self._token_param = token_param
 
-    async def complete(self, model, prompt, effort, max_tokens, params: dict[str, Any]) -> str:
+    async def complete(self, model, prompt, effort, max_tokens, params: dict[str, Any]) -> Completion:
         kwargs: dict[str, Any] = {self._token_param: max_tokens}
         if effort is not None:
             kwargs["reasoning_effort"] = effort
@@ -22,4 +22,5 @@ class OpenAIProtocolClient(ChatClient):
         resp = await self._client.chat.completions.create(
             model=model, messages=[{"role": "user", "content": prompt}], **kwargs
         )
-        return resp.choices[0].message.content or ""
+        tokens = resp.usage.completion_tokens if resp.usage else None  # includes reasoning tokens
+        return Completion(resp.choices[0].message.content or "", tokens)

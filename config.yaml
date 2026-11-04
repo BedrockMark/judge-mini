@@ -2,10 +2,10 @@
 dataset_dir: LLM-Judge-Bias-Dataset
 env_file: .env                # API keys live here (git-ignored); see .env.example
 results_dir: results
-samples_per_bias: 50          # seed-fixed subset per dataset
+samples_per_bias: 150          # seed-fixed subset per dataset
 seed: 0
 concurrency: 32               # max in-flight requests per model (each model is its own server)
-cr_repeats: 2                 # original prompt is judged this many times -> Consistency Rate
+cr_repeats: 4                 # original prompt is judged this many times -> Consistency Rate
 max_tokens: 16000             # per-response cap (thinking + answer)
 
 # Key-matching: each provider names its protocol and the .env variable holding its key.
@@ -18,15 +18,10 @@ providers:
 # effort -> anthropic: output_config.effort ; openai: reasoning_effort ; null = send nothing (model default).
 # params  -> extra request fields passed through verbatim (e.g. turning Sonnet 5.5 thinking off).
 judges:
-  # - {label: "GPT-6-luna (None)",     provider: openai,   model: gpt-6-luna, effort: none}
-  # - {label: "GPT-6-luna (Low)",     provider: openai,   model: gpt-6-luna, effort: low}
-  # - {label: "GPT-6-luna (Medium)",     provider: openai,   model: gpt-6-luna, effort: medium}
-  - {label: "GPT-oss-20b (low)",     provider: Alliance,   model: gpt-oss-20b, effort: low}
-  - {label: "GPT-oss-20b (medium)",     provider: Alliance,   model: gpt-oss-20b, effort: medium}
-  - {label: "GPT-oss-20b (high)",     provider: Alliance,   model: gpt-oss-20b, effort: high}
-  - {label: "GPT-oss-120b (low)",     provider: Alliance,   model: gpt-oss-120b, effort: low}
-  - {label: "GPT-oss-120b (medium)",     provider: Alliance,   model: gpt-oss-120b, effort: medium}
-  - {label: "GPT-oss-120b (high)",     provider: Alliance,   model: gpt-oss-120b, effort: high}
+  # effort may be a list: one judge per effort, labelled "<label> (<effort>)", joined as one group in the cost plots
+  # - {label: "GPT-6-luna",     provider: openai,   model: gpt-6-luna, effort: [none, low, medium]}
+  - {label: "GPT-oss-20b",     provider: Alliance,   model: gpt-oss-20b, effort: [low, medium, high]}
+  - {label: "GPT-oss-120b",    provider: Alliance,   model: gpt-oss-120b, effort: [low, medium, high]}
 
 biases: all                   # or a subset, e.g. [position, verbosity, cot]
 

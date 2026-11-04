@@ -301,7 +301,8 @@ def test_each_command_writes_a_new_timestamped_folder(tmp_path):
     assert main(["run", *base, "--judge", "b"]) == 0
     first, second = runs()
     for d in (first, second):
-        assert {"summary.csv", "bias_grid.png", "raw", "examples", "raw.zip", "examples.zip"} <= {p.name for p in d.iterdir()}
+        assert {"summary.csv", "bias_grid.png", "cost_vs_performance.png", "correctness_grid.png", "utility.png",
+                "utility.csv", "raw", "examples", "raw.zip", "examples.zip"} <= {p.name for p in d.iterdir()}
         for name in ("raw", "examples"):  # each zip holds exactly the folder's files, byte for byte
             with zipfile.ZipFile(d / f"{name}.zip") as z:
                 files = {f.relative_to(d).as_posix(): f.read_bytes() for f in (d / name).rglob("*") if f.is_file()}
@@ -317,3 +318,120 @@ def test_each_command_writes_a_new_timestamped_folder(tmp_path):
     for d in runs():  # every folder carries a copy of the log of the command that wrote it
         (log,) = d.glob("*.log")
         assert str(d) in log.read_text(encoding="utf-8")
+
+
+def test_empty_dataset_folder_gives_submodule_hint(tmp_path):
+    from judgebias.config import require_dataset
+    cfg = parse_config({"dataset_dir": str(tmp_path), "results_dir": str(tmp_path / "r"),
+                        "providers": {"fake": {"protocol": "fake"}},
+                        "judges": [{"label": "a", "provider": "fake", "model": "m"}]})
+    with pytest.raises(ConfigError, match="git submodule update --init"):
+        require_dataset(cfg)
+    require_dataset(cfg.model_copy(update={"dataset_dir": DATASET}))
+
+
+# --- token usage & cost plots -------------------------------------------------------------------
+
+class _Counted(FakeClient):
+    async def complete(self, model, prompt, effort, max_tokens, params):
+        from judgebias.llm import Completion
+        return Completion("[[A]]", 100 if effort == "low" else 10)
+
+
+def test_usage_billed_per_judge_and_bias_including_cache_hits(tmp_path):
+    from judgebias.context import current_bias
+    cfg = make_cfg(tmp_path)
+    a, b = cfg.judges
+
+    async def go(ctx):
+        async def as_bias(name, judge, prompt):
+            current_bias.set(name)
+            return await ctx.ask(judge, prompt)
+        await asyncio.gather(as_bias("x", a, "p"), as_bias("x", a, "p"), as_bias("y", a, "p"), as_bias("x", b, "q"))
+
+    cache = ResponseCache(tmp_path / "cache.jsonl")
+    ctx = Context(cfg, {"fake": _Counted()}, cache)
+    asyncio.run(go(ctx))
+    cache.close()
+    assert ctx.stats["api_calls"] == 2  # duplicates deduplicated, yet every ask is billed
+    assert (ctx.usage[("a", "x")].calls, ctx.usage[("a", "x")].mean_output_tokens) == (2, 100)
+    assert ctx.usage[("a", "y")].output_tokens == 100 and ctx.usage[("b", "x")].output_tokens == 10
+
+    cache = ResponseCache(tmp_path / "cache.jsonl")  # token counts survive a reload
+    ctx = Context(cfg, {"fake": _Counted()}, cache)
+    asyncio.run(go(ctx))
+    cache.close()
+    assert ctx.stats["api_calls"] == 0 and ctx.usage[("a", "x")].mean_output_tokens == 100
+
+
+def test_old_cache_entries_have_unknown_usage(tmp_path):
+    import json
+    from judgebias.llm import cache_key
+    cfg = make_cfg(tmp_path)
+    key = cache_key("fake", "m1", "low", {}, "p", 0)
+    (tmp_path / "cache.jsonl").write_text(json.dumps({"key": key, "response": "[[A]]"}) + "\n", encoding="utf-8")
+    cache = ResponseCache(tmp_path / "cache.jsonl")
+    ctx = Context(cfg, {"fake": _Counted()}, cache)
+    assert asyncio.run(ctx.ask(cfg.judges[0], "p")) == "[[A]]"
+    cache.close()
+    u = ctx.usage[("a", None)]
+    assert (u.calls, u.known) == (1, 0) and math.isnan(u.mean_output_tokens)
+
+
+def test_utility_table_weights_tokens_by_calls(tmp_path):
+    from judgebias.plot import utility_table
+    cfg = make_cfg(tmp_path)
+    summary = pd.DataFrame([
+        {"judge": "a", "bias": "position", "correctness": 0.5, "calls": 10, "out_tokens": 100.0},
+        {"judge": "a", "bias": "cot", "correctness": 1.0, "calls": 30, "out_tokens": 200.0},
+        {"judge": "b", "bias": "position", "correctness": 0.25, "calls": 0, "out_tokens": math.nan},
+    ])
+    t = utility_table(cfg, summary).set_index("judge")
+    assert t.loc["a", "mean_correctness"] == 0.75 and t.loc["a", "std_correctness"] == 0.25
+    assert t.loc["a", "out_tokens"] == 175 and t.loc["a", "calls"] == 40
+    assert t.loc["b", "mean_correctness"] == 0.25 and math.isnan(t.loc["b", "out_tokens"])
+
+
+def test_plot_all_handles_summaries_without_cost_columns(tmp_path):
+    from judgebias.plot import plot_all
+    cfg = make_cfg(tmp_path)
+    old = pd.DataFrame([{"judge": j, "model": "m", "effort": None, "bias": "position", "metric": "robustness",
+                         "value": 0.8, "cr": 0.9, "n": 3, "n_invalid": 0, "extra": "{}"} for j in ("a", "b")])
+    outs = plot_all(cfg, old, tmp_path)
+    assert all(p.exists() for p in outs) and (tmp_path / "utility.csv").exists()
+
+
+def test_effort_list_expands_into_one_group(tmp_path):
+    cfg = make_cfg(tmp_path, judges=[{"label": "G", "provider": "fake", "model": "m", "effort": ["low", None],
+                                      "color": "red"},
+                                     {"label": "S", "provider": "fake", "model": "m", "effort": "high"}])
+    assert [(j.label, j.effort, j.group, j.color) for j in cfg.judges] == [
+        ("G (low)", "low", "G", "red"), ("G (None)", None, "G", "red"), ("S", "high", "S", None)]
+    with pytest.raises(ConfigError, match="empty effort list"):
+        make_cfg(tmp_path, judges=[{"label": "G", "provider": "fake", "model": "m", "effort": []}])
+    with pytest.raises(ConfigError, match="unique"):  # expanded labels must not clash with other entries
+        make_cfg(tmp_path, judges=[{"label": "G", "provider": "fake", "model": "m", "effort": ["low"]},
+                                   {"label": "G (low)", "provider": "fake", "model": "m"}])
+
+
+def test_group_colors_tint_by_effort(tmp_path):
+    from judgebias.plot import PALETTE, _judges_and_colors
+    cfg = make_cfg(tmp_path, judges=[{"label": "G", "provider": "fake", "model": "m", "effort": ["high", "low"]},
+                                     {"label": "S", "provider": "fake", "model": "m"}])
+    _, colors = _judges_and_colors(cfg, pd.DataFrame({"judge": ["G (high)", "G (low)", "S"]}))
+    assert colors["G (high)"] == PALETTE[0] and colors["S"] == PALETTE[1]  # highest effort = full hue
+    assert colors["G (low)"] != PALETTE[0]
+
+
+def test_summary_counts_every_sample(tmp_path):
+    from judgebias.runner import run
+    cfg = make_cfg(tmp_path, biases=["authority", "cot"],
+                   judges=[{"label": "G", "provider": "fake", "model": "m", "effort": ["low", "high"]}])
+    out = tmp_path / "out"
+    out.mkdir()
+    s = asyncio.run(run(cfg, out)).set_index(["judge", "bias"])
+    auth = s.loc[("G (low)", "authority")]
+    assert auth["samples"] > auth["n"]  # several perturbations per dataset row, all counted
+    assert (s["correctness"] == s["n_correct"] / s["samples"]).all()
+    assert (s["n_correct"] + s["n_wrong"] <= s["samples"]).all() and set(s["group"]) == {"G"}
+    assert s.loc[("G (high)", "cot"), "out_tokens"] > s.loc[("G (low)", "cot"), "out_tokens"]

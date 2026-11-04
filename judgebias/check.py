@@ -5,7 +5,7 @@ import asyncio
 import time
 from dataclasses import dataclass
 
-from .config import Config, JudgeSpec, resolve_keys
+from .config import Config, JudgeSpec, require_dataset, resolve_keys
 from .llm import ChatClient, build_clients
 from .parse import parse_verdict
 from .prompts import load_templates
@@ -48,6 +48,7 @@ async def live_check(cfg: Config, keys: dict[str, str | None]) -> list[CallCheck
 def run_check(cfg: Config, live: bool = True) -> bool:
     """Print a report; return True only if everything passed. Config/key errors raise ConfigError."""
     keys = resolve_keys(cfg)
+    require_dataset(cfg)
     biases = cfg.selected_biases()
     print(f"Config OK: {len(cfg.judges)} judge(s), {len(biases)} bias(es); keys found for {sorted(keys)}")
     if "self_enhancement" in biases and len(cfg.judges) < 2:
