@@ -314,3 +314,6 @@ def test_each_command_writes_a_new_timestamped_folder(tmp_path):
     assert sorted(pd.read_csv(merged / "summary.csv")["judge"]) == ["a", "b"]
     assert main(["plot", *base]) == 0  # no --run: re-plots the newest folder (the merged one) into another
     assert len(runs()) == 4
+    for d in runs():  # every folder carries a copy of the log of the command that wrote it
+        (log,) = d.glob("*.log")
+        assert str(d) in log.read_text(encoding="utf-8")

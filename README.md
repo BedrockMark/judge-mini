@@ -101,7 +101,8 @@ tests/            pytest suite (no network)
 ```
 
 Every command also writes all log records (INFO and above, including warnings, errors and tracebacks) to
-`<log_dir>/<command>_<YYYYmmdd_HHMMSS>.log`, one file per invocation.
+`<log_dir>/<command>_<YYYYmmdd_HHMMSS>.log`, one file per invocation; `run` and `plot` also copy it into their
+`results/<YYYYmmdd_HHMMSS>/` folder when they finish (or fail).
 
 Every `run` and `plot` writes to a new `results/<YYYYmmdd_HHMMSS>/` folder, so earlier outputs are never overwritten:
 `summary.csv`, `bias_grid.png`, per-item `raw/<judge>/<bias>.jsonl` and `examples/` plus zipped copies

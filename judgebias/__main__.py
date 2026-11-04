@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import shutil
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -37,6 +38,7 @@ def main(argv: list[str] | None = None) -> int:
     for noisy in ("httpx", "httpx2", "openai", "anthropic"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
+    out_dir = None
     try:
         cfg = load_config(args.config)
         log_dir = Path(args.log_dir) if args.log_dir else cfg.log_dir
@@ -45,6 +47,7 @@ def main(argv: list[str] | None = None) -> int:
         fh = logging.FileHandler(log_path, encoding="utf-8")  # all INFO+ records, incl. warnings/errors
         fh.setFormatter(logging.Formatter(fmt, "%Y-%m-%d %H:%M:%S"))
         logging.getLogger().addHandler(fh)
+        logging.getLogger().setLevel(logging.INFO)  # basicConfig is a no-op if the root logger already has handlers
         logging.info("command=%s config=%s log_file=%s", args.cmd, args.config, log_path)
         if args.cmd == "check":
             return 0 if run_check(cfg, live=not args.no_call) else 1
@@ -69,6 +72,10 @@ def main(argv: list[str] | None = None) -> int:
     except Exception:
         logging.exception("Unhandled error")  # traceback goes to the log file too
         raise
+    finally:
+        if out_dir is not None:  # copy this command's log next to its results (also when it failed)
+            fh.flush()
+            shutil.copy2(log_path, out_dir / log_path.name)
 
 
 def _run_dir(cfg, name: str) -> Path:
