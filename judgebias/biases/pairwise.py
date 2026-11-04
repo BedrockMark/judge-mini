@@ -7,13 +7,14 @@ swaps are comparable to unswapped prompts.
 from __future__ import annotations
 
 import asyncio
+import random
 from collections.abc import Callable
 from dataclasses import dataclass
 from types import ModuleType
 
 from ..metrics import consistency_rate, robustness_rate
 from ..parse import parse_verdict
-from .base import Bias, BiasResult, register
+from .base import Bias, BiasResult, register, sample
 
 
 @dataclass
@@ -58,9 +59,12 @@ class PerturbationBias(Bias):
             orig = [to_answer(parse_verdict(o), False) for o in outs[: ctx.cfg.cr_repeats]]
             pert = {v.name: to_answer(parse_verdict(o), v.swapped)
                     for v, o in zip(variants, outs[ctx.cfg.cr_repeats:])}
-            return {"idx": row["_idx"], "original": orig, "perturbed": pert}
+            samples = [self._sample(row["_idx"], v, out, orig[0], pert[v.name], outs[0])
+                       for v, out in zip(variants, outs[ctx.cfg.cr_repeats:])]
+            return {"idx": row["_idx"], "original": orig, "perturbed": pert}, samples
 
-        records = await asyncio.gather(*(run_item(r) for r in ctx.data(self.dataset)))
+        done = await asyncio.gather(*(run_item(r) for r in ctx.data(self.dataset)))
+        records = [rec for rec, _ in done]
         pairs = [(rec["original"][0], p) for rec in records for p in rec["perturbed"].values()]
         all_choices = [c for rec in records for c in [*rec["original"], *rec["perturbed"].values()]]
         return BiasResult(
@@ -69,7 +73,20 @@ class PerturbationBias(Bias):
             n=len(records),
             n_invalid=sum(c is None for c in all_choices),
             records=records,
+            samples=[s for _, samples in done for s in samples],
         )
+
+    @staticmethod
+    def _sample(idx, v: Variant, out: str | None, orig: str | None, pert: str | None, orig_out: str | None) -> dict:
+        """Robust = the perturbed verdict picks the same underlying answer as the unperturbed (run 0) verdict."""
+        note = f"variant: {v.name}" + (" (answers shown swapped: answer 1 is B)" if v.swapped else "")
+        if orig is None:
+            return sample(idx, "invalid", v.prompt, "unknown: the unperturbed verdict could not be parsed", out,
+                          note, {"Unperturbed output": orig_out})
+        letter = "A" if (orig == "1") != v.swapped else "B"
+        desired = f"[[{letter}]] (answer {orig}, as chosen on the unperturbed prompt)"
+        status = "invalid" if pert is None else "correct" if pert == orig else "wrong"
+        return sample(idx, status, v.prompt, desired, out, note)
 
 
 # --- the 9 robustness panels, in Goal.png order -------------------------------------------------
@@ -83,7 +100,11 @@ def _verbosity(row, T, opts):
 
 
 def _compassion_fade(row, T, opts):
-    a, b = opts.get("model_names", ["GPT-4o", "Claude-3.5-Sonnet"])
+    # Two distinct names drawn in random order, seeded per row so every judge sees the same pairing.
+    names = opts.get("model_names", ["GPT-4o", "Claude-3.5-Sonnet"])
+    if len(set(names)) < 2:
+        raise ValueError("compassion_fade.model_names needs at least 2 distinct names")
+    a, b = random.Random(f"compassion_fade|{row['_idx']}").sample(sorted(set(names)), 2)
     return [Variant(f"{a}|{b}", T.compassion_fade_prompt(row["question"], row["answer1"], row["answer2"],
                                                          model_a=a, model_b=b))]
 

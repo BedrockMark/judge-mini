@@ -8,7 +8,7 @@ from types import ModuleType
 
 from .config import Config, JudgeSpec
 from .data import load_dataset
-from .llm import ChatClient, ResponseCache, cache_key
+from .llm import ChatClient, RateLimiter, ResponseCache, cache_key
 from .prompts import load_templates
 
 log = logging.getLogger(__name__)
@@ -19,10 +19,11 @@ class Context:
     cfg: Config
     clients: dict[str, ChatClient]
     cache: ResponseCache
-    stats: dict[str, int] = field(default_factory=lambda: {"api_calls": 0, "cache_hits": 0, "errors": 0})
+    stats: dict[str, int] = field(default_factory=lambda: {"api_calls": 0, "cache_hits": 0, "errors": 0, "rate_limited": 0})
 
     def __post_init__(self) -> None:
-        self._sem = asyncio.Semaphore(self.cfg.concurrency)
+        self._sems: dict[tuple[str, str], asyncio.Semaphore] = {}  # one per (provider, model): each is its own server
+        self._limiters = {name: RateLimiter(p.rpm) for name, p in self.cfg.providers.items() if p.rpm}
         self._inflight: dict[str, asyncio.Task] = {}
 
     @property
@@ -52,8 +53,13 @@ class Context:
 
     async def _call(self, key: str, judge: JudgeSpec, prompt: str, run_idx: int) -> str | None:
         client = self.clients[judge.provider]
-        async with self._sem:
-            for attempt in range(3):
+        sem = self._sems.setdefault((judge.provider, judge.model), asyncio.Semaphore(self.cfg.concurrency))
+        limiter = self._limiters.get(judge.provider)
+        async with sem:
+            attempt = throttled = 0
+            while attempt < 3:
+                if limiter:
+                    await limiter.acquire()
                 try:
                     text = await client.complete(
                         judge.model, prompt, judge.effort, self.cfg.max_tokens, judge.params
@@ -63,7 +69,15 @@ class Context:
                                                "effort": judge.effort, "run_idx": run_idx})
                     return text
                 except Exception as e:  # SDKs already retry transient errors; this covers the rest
-                    log.warning("%s attempt %d failed: %s", judge.label, attempt + 1, e)
+                    if getattr(e, "status_code", None) == 429 and throttled < 20:
+                        # quota window is 60 s and shared by the key (other runs too): wait it out, not an attempt
+                        throttled += 1
+                        self.stats["rate_limited"] += 1
+                        log.warning("%s rate-limited (429), waiting 30s", judge.label)
+                        await asyncio.sleep(30)
+                        continue
+                    attempt += 1
+                    log.warning("%s attempt %d failed: %s", judge.label, attempt, e)
                     await asyncio.sleep(2 ** attempt)
         self.stats["errors"] += 1
         return None

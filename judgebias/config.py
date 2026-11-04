@@ -19,6 +19,7 @@ class ProviderSpec(BaseModel):
     base_url: str | None = None
     api_key_env: str | None = None  # name of the variable in .env, never the key itself
     token_param: str = "max_completion_tokens"  # openai protocol only; some compat servers want max_tokens
+    rpm: int | None = None  # client-side cap on requests per 60 s, shared by every judge on this provider (key)
 
 
 class JudgeSpec(BaseModel):
@@ -37,7 +38,7 @@ class Config(BaseModel):
     log_dir: Path | None = None  # default: <results_dir>/logs
     samples_per_bias: int = 50
     seed: int = 0
-    concurrency: int = 8
+    concurrency: int = 8  # max in-flight requests per (provider, model)
     cr_repeats: int = 2
     max_tokens: int = 16000
     providers: dict[str, ProviderSpec]

@@ -21,8 +21,9 @@ cp .env.example .env         # then fill in the keys you need
 
 ```bash
 uv run python -m judgebias check --config config.yaml   # validate config + keys, then one test call per judge
-uv run python -m judgebias run   --config config.yaml   # run judges x biases -> results/summary.csv + bias_grid.png
-uv run python -m judgebias plot  --config config.yaml   # redraw the figure from results/summary.csv
+uv run python -m judgebias run   --config config.yaml   # run judges x biases -> results/<timestamp>/summary.csv + bias_grid.png
+uv run python -m judgebias plot  --config config.yaml   # redraw the newest run into a new results/<timestamp>/
+uv run python -m judgebias plot  --config config.yaml --run 20261103_150000 --run 20261103_160000  # merge runs
 uv run pytest                                           # tests (no API calls)
 ```
 
@@ -46,7 +47,8 @@ Run `check` first, and start `run` with a small `samples_per_bias` (e.g. 5) as a
 |---|---|
 | `dataset_dir` | Path to the dataset repo (default `LLM-Judge-Bias-Dataset`) |
 | `samples_per_bias` / `seed` | Seed-fixed subset size per dataset |
-| `concurrency` | Max simultaneous API calls |
+| `concurrency` | Max simultaneous API calls per model |
+| `providers.<name>.rpm` | Optional client-side cap on requests per 60 s, shared by all judges on that provider (API key) |
 | `cr_repeats` | Times the unperturbed prompt is judged, for Consistency Rate (≥ 2) |
 | `max_tokens` | Per-response cap (thinking + answer) |
 | `log_dir` | Where log files go (default `<results_dir>/logs`); override per run with `--log-dir` |
@@ -93,7 +95,7 @@ judgebias/
   context.py      cached, concurrency-limited `ask` shared by all biases
   data.py, prompts.py, parse.py, metrics.py
   biases/         one module/registration per panel; registry is `BIASES`
-  runner.py       judge x bias loop -> results/
+  runner.py       judge x bias loop -> results/<timestamp>/
   plot.py         3x4 figure
 tests/            pytest suite (no network)
 ```
@@ -101,9 +103,23 @@ tests/            pytest suite (no network)
 Every command also writes all log records (INFO and above, including warnings, errors and tracebacks) to
 `<log_dir>/<command>_<YYYYmmdd_HHMMSS>.log`, one file per invocation.
 
-Outputs go to `results/`: `summary.csv`, `bias_grid.png`, per-item `raw/<judge>/<bias>.jsonl`, and
-`cache/responses.jsonl`. Responses are cached by (provider, model, effort, params, prompt, repeat), so
+Every `run` and `plot` writes to a new `results/<YYYYmmdd_HHMMSS>/` folder, so earlier outputs are never overwritten:
+`summary.csv`, `bias_grid.png`, per-item `raw/<judge>/<bias>.jsonl` and `examples/` (run), or the merged `summary.csv`,
+`bias_grid.png` and `sources.txt` (plot; with several `--run`, a later run wins on the same judge × bias).
+Only `results/cache/responses.jsonl` is shared across runs. Responses are cached by (provider, model, effort, params, prompt, repeat), so
 re-running costs nothing for finished work and failed calls are retried.
+
+`examples/<bias>/<judge>/{correct,wrong,invalid}.md` hold up to 5 example calls each (input prompt, desired
+output, actual output), under a table with that judge's correct/wrong/invalid counts for the bias:
+
+| Bias | Sample | Correct when |
+|---|---|---|
+| Robustness panels | one perturbed prompt | verdict picks the same answer as the unperturbed (repeat 0) verdict |
+| CoT | one CoT prompt | verdict picks answer 1 |
+| Self-Enhancement | judge scoring its own answer | self score within ±0.5 of the other judges' mean |
+| Refinement-Aware | score with the "refined" note | score equals the score without the note |
+
+Invalid = a verdict/score needed for the comparison could not be parsed (or the call failed).
 
 ## Extending
 

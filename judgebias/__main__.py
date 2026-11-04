@@ -8,12 +8,10 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-import pandas as pd
-
 from .check import run_check
 from .config import ConfigError, load_config
 from .plot import plot_summary
-from .runner import run, summary_path
+from .runner import latest_output_dir, merge_summaries, new_output_dir, run
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -21,7 +19,7 @@ def main(argv: list[str] | None = None) -> int:
     sub = p.add_subparsers(dest="cmd", required=True)
     for name, help_ in [("check", "validate config and .env keys, then make one test call per judge"),
                         ("run", "run judges x biases, then plot"),
-                        ("plot", "plot results/summary.csv")]:
+                        ("plot", "plot the latest run (or merge several with --run) into a new folder")]:
         sp = sub.add_parser(name, help=help_)
         sp.add_argument("--config", default="config.yaml")
         sp.add_argument("--log-dir", help="directory for the log file (default: <results_dir>/logs)")
@@ -30,6 +28,9 @@ def main(argv: list[str] | None = None) -> int:
         if name == "run":
             sp.add_argument("--judge", action="append", help="judge label (repeatable)")
             sp.add_argument("--bias", action="append", help="bias name (repeatable)")
+        if name == "plot":
+            sp.add_argument("--run", action="append",
+                            help="run folder (path or name under results_dir), repeatable; later wins on overlap")
     args = p.parse_args(argv)
     fmt, datefmt = "%(asctime)s %(levelname)-7s %(name)s: %(message)s", "%H:%M:%S"
     logging.basicConfig(level=logging.INFO, format=fmt, datefmt=datefmt)
@@ -48,9 +49,17 @@ def main(argv: list[str] | None = None) -> int:
         if args.cmd == "check":
             return 0 if run_check(cfg, live=not args.no_call) else 1
         if args.cmd == "run":
-            asyncio.run(run(cfg, args.judge, args.bias))
-        summary = pd.read_csv(summary_path(cfg))
-        out = plot_summary(cfg, summary, cfg.results_dir / "bias_grid.png")
+            out_dir = new_output_dir(cfg)
+            logging.info("output folder: %s", out_dir)
+            summary = asyncio.run(run(cfg, out_dir, args.judge, args.bias))
+        else:
+            sources = [_run_dir(cfg, r) for r in args.run] if args.run else [latest_output_dir(cfg)]
+            summary = merge_summaries(sources)
+            out_dir = new_output_dir(cfg)
+            summary.to_csv(out_dir / "summary.csv", index=False)
+            (out_dir / "sources.txt").write_text("".join(f"{d}\n" for d in sources), encoding="utf-8")
+            logging.info("plotting %s -> %s", [d.name for d in sources], out_dir)
+        out = plot_summary(cfg, summary, out_dir / "bias_grid.png")
         print(f"Wrote {out}")
         return 0
     except ConfigError as e:
@@ -60,6 +69,15 @@ def main(argv: list[str] | None = None) -> int:
     except Exception:
         logging.exception("Unhandled error")  # traceback goes to the log file too
         raise
+
+
+def _run_dir(cfg, name: str) -> Path:
+    path = Path(name)
+    if not (path / "summary.csv").exists():
+        path = cfg.results_dir / name
+    if not (path / "summary.csv").exists():
+        raise FileNotFoundError(f"No summary.csv in run folder '{name}'")
+    return path
 
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@ import asyncio
 import math
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 from judgebias.biases import BIASES
@@ -156,6 +157,21 @@ def test_position_swaps_answers():
     assert p.index("SECOND") < p.index("FIRST")
 
 
+def test_compassion_fade_samples_two_names_in_random_order():
+    from judgebias.biases.pairwise import _compassion_fade
+    from judgebias.prompts import load_templates
+    T = load_templates(DATASET)
+    names = ["M1", "M2", "M3", "M4"]
+    pairs = [_compassion_fade({"_idx": i, "question": "Q", "answer1": "x", "answer2": "y"}, T,
+                              {"model_names": names})[0].name.split("|") for i in range(40)]
+    assert all(a != b and a in names and b in names for a, b in pairs)
+    assert len({(a, b) for a, b in pairs}) > 6  # several pairs, both orders
+    again = _compassion_fade({"_idx": 0, "question": "Q", "answer1": "x", "answer2": "y"}, T, {"model_names": names})
+    assert again[0].name.split("|") == pairs[0]  # deterministic per row
+    with pytest.raises(ValueError):
+        _compassion_fade({"_idx": 0, "question": "Q", "answer1": "x", "answer2": "y"}, T, {"model_names": ["M1"]})
+
+
 def test_cache_prevents_repeat_calls(tmp_path):
     cfg = make_cfg(tmp_path)
     for expected_calls in (None, 0):
@@ -203,3 +219,93 @@ def test_live_check_reports_each_outcome(tmp_path, client, ok, needle):
     cfg = make_cfg(tmp_path)
     res = asyncio.run(_call_one(cfg.judges[0], client, _test_prompt(cfg), 100))
     assert res.ok is ok and needle in res.detail
+
+
+@pytest.mark.parametrize("bias_name", list(BIASES))
+def test_every_bias_yields_classified_samples(tmp_path, bias_name):
+    from judgebias.examples import write_examples
+    cfg = make_cfg(tmp_path)
+    ctx = Context(cfg, {"fake": FakeClient()}, ResponseCache(tmp_path / "cache.jsonl"))
+    res = asyncio.run(BIASES[bias_name].evaluate(cfg.judges[0], ctx))
+    ctx.cache.close()
+    assert res.samples and all(s["status"] in ("correct", "wrong", "invalid") for s in res.samples)
+    assert all(s["input"] and s["desired"] for s in res.samples)
+    write_examples(tmp_path / "ex", cfg.judges[0], BIASES[bias_name], res.samples, k=2)
+    for status in ("correct", "wrong", "invalid"):
+        text = (tmp_path / "ex" / f"{status}.md").read_text(encoding="utf-8")
+        n = sum(s["status"] == status for s in res.samples)
+        assert f"Showing {min(n, 2)} of {n} {status} examples." in text
+
+
+# --- rate limiting ------------------------------------------------------------------------------
+
+def test_rate_limiter_caps_starts_per_window(monkeypatch):
+    import time
+    from judgebias.llm import ratelimit
+    monkeypatch.setattr(ratelimit, "WINDOW", 0.2)
+    limiter = ratelimit.RateLimiter(rpm=2)
+
+    async def go():
+        start = time.monotonic()
+        for _ in range(5):  # 2 per window -> third and fifth start must wait a full window each
+            await limiter.acquire()
+        return time.monotonic() - start
+
+    assert asyncio.run(go()) >= 0.4
+
+
+class Throttled(Exception):
+    status_code = 429
+
+
+class FlakyClient(FakeClient):
+    def __init__(self, n_429):
+        self.n_429, self.calls = n_429, 0
+
+    async def complete(self, *a, **k):
+        self.calls += 1
+        if self.calls <= self.n_429:
+            raise Throttled("Rate Limit Exceeded")
+        return "[[A]]"
+
+
+def test_429_waits_without_spending_attempts(tmp_path, monkeypatch):
+    async def no_sleep(_):
+        pass
+    monkeypatch.setattr("judgebias.context.asyncio.sleep", no_sleep)
+    cfg = make_cfg(tmp_path, providers={"fake": {"protocol": "fake", "rpm": 100}})
+    client = FlakyClient(n_429=5)  # more 429s than the 3 attempts
+    cache = ResponseCache(tmp_path / "cache.jsonl")
+    ctx = Context(cfg, {"fake": client}, cache)
+    assert asyncio.run(ctx.ask(cfg.judges[0], "p")) == "[[A]]"
+    cache.close()
+    assert ctx.stats["rate_limited"] == 5 and ctx.stats["errors"] == 0
+
+
+# --- output folders -----------------------------------------------------------------------------
+
+def test_each_command_writes_a_new_timestamped_folder(tmp_path):
+    import yaml
+    from judgebias.__main__ import main
+    from judgebias.runner import RUN_DIR_RE
+    cfg = {"dataset_dir": str(DATASET), "env_file": None, "results_dir": str(tmp_path / "results"),
+           "samples_per_bias": 3, "biases": ["position"], "providers": {"fake": {"protocol": "fake"}},
+           "judges": [{"label": "a", "provider": "fake", "model": "m1"}, {"label": "b", "provider": "fake", "model": "m2"}]}
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+    base = ["--config", str(path), "--log-dir", str(tmp_path / "logs")]
+    runs = lambda: sorted(d for d in (tmp_path / "results").iterdir() if RUN_DIR_RE.match(d.name))
+
+    assert main(["run", *base, "--judge", "a"]) == 0
+    assert main(["run", *base, "--judge", "b"]) == 0
+    first, second = runs()
+    for d in (first, second):
+        assert {"summary.csv", "bias_grid.png", "raw", "examples"} <= {p.name for p in d.iterdir()}
+    assert (tmp_path / "results" / "cache" / "responses.jsonl").exists()  # cache stays shared
+
+    assert main(["plot", *base, "--run", first.name, "--run", str(second)]) == 0
+    merged = runs()[-1]
+    assert merged not in (first, second)
+    assert sorted(pd.read_csv(merged / "summary.csv")["judge"]) == ["a", "b"]
+    assert main(["plot", *base]) == 0  # no --run: re-plots the newest folder (the merged one) into another
+    assert len(runs()) == 4

@@ -4,7 +4,7 @@ env_file: .env                # API keys live here (git-ignored); see .env.examp
 results_dir: results
 samples_per_bias: 50          # seed-fixed subset per dataset
 seed: 0
-concurrency: 8
+concurrency: 32               # max in-flight requests per model (each model is its own server)
 cr_repeats: 2                 # original prompt is judged this many times -> Consistency Rate
 max_tokens: 16000             # per-response cap (thinking + answer)
 
@@ -12,25 +12,23 @@ max_tokens: 16000             # per-response cap (thinking + answer)
 providers:
   anthropic: {protocol: anthropic, base_url: null, api_key_env: ANTHROPIC_API_KEY}
   openai:    {protocol: openai, base_url: https://api.openai.com/v1, api_key_env: OPENAI_API_KEY}
-  # deepseek:  {protocol: openai, base_url: https://api.deepseek.com, api_key_env: DEEPSEEK_API_KEY,
-  #             token_param: max_tokens}
+  # Alliance quota (measured 2026-11-03): ~300 requests / 60 s fixed window, per key, shared by ALL models.
+  Alliance :  {protocol: openai, base_url: https://inference.vulcan.alliancecan.ca/v1, api_key_env: TYK_KEY, rpm: 280}
 
 # effort -> anthropic: output_config.effort ; openai: reasoning_effort ; null = send nothing (model default).
 # params  -> extra request fields passed through verbatim (e.g. turning Sonnet 5.5 thinking off).
 judges:
-  # - {label: "Sonnet-5.5 (no think)", provider: anthropic, model: claude-sonnet-5-5, effort: null, params: {thinking: {type: between_tools}}}
-  # - {label: "Sonnet-5.5 (low)",  provider: anthropic, model: claude-sonnet-5-5, effort: low}
-  # - {label: "Sonnet-5.5 (high)", provider: anthropic, model: claude-sonnet-5-5, effort: high}
-  # - {label: "Haiku-5.5 (low)", provider: anthropic, model: claude-haiku-5-5, effort: low}
-  - {label: "GPT-6-luna (None)",     provider: openai,   model: gpt-6-luna, effort: none}
-  - {label: "GPT-6-luna (Low)",     provider: openai,   model: gpt-6-luna, effort: low}
-  - {label: "GPT-6-luna (Medium)",     provider: openai,   model: gpt-6-luna, effort: medium}
-  # - {label: "DeepSeek",         provider: deepseek, model: deepseek-chat,     effort: null}
+  # - {label: "GPT-6-luna (None)",     provider: openai,   model: gpt-6-luna, effort: none}
+  # - {label: "GPT-6-luna (Low)",     provider: openai,   model: gpt-6-luna, effort: low}
+  # - {label: "GPT-6-luna (Medium)",     provider: openai,   model: gpt-6-luna, effort: medium}
+  - {label: "GPT-oss-20b (low)",     provider: Alliance,   model: gpt-oss-20b, effort: low}
+  - {label: "GPT-oss-20b (medium)",     provider: Alliance,   model: gpt-oss-20b, effort: medium}
+  - {label: "GPT-oss-20b (high)",     provider: Alliance,   model: gpt-oss-20b, effort: high}
 
-biases: [verbosity]                   # or a subset, e.g. [position, verbosity, cot]
+biases: all                   # or a subset, e.g. [position, verbosity, cot]
 
 bias_options:                 # optional per-bias knobs (defaults shown)
-  compassion_fade: {model_names: ["GPT-4o", "Claude-3.5-Sonnet"]}
+  compassion_fade: {model_names: ["GPT-4o", "Claude-3.5-Sonnet"]}  # >=2 names; per row, 2 drawn in random order
   bandwagon: {number: 90}
   diversity: {groups: ["Homosexual", "Black", "Female", "HIV Positive"]}
 

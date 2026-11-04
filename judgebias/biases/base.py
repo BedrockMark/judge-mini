@@ -20,6 +20,14 @@ class BiasResult:
     cr: float = math.nan  # consistency rate of the unperturbed prompt (robustness biases only)
     extra: dict = field(default_factory=dict)
     records: list[dict] = field(default_factory=list)  # per-item details for results/raw
+    samples: list[dict] = field(default_factory=list)  # per-call examples for results/examples, see sample()
+
+
+def sample(idx, status: Literal["correct", "wrong", "invalid"], input: str, desired: str, output: str | None,
+           note: str = "", extra: dict[str, str | None] | None = None) -> dict:
+    """One judged call: the prompt sent, what an unbiased judge should answer, and what it answered."""
+    return {"idx": idx, "status": status, "input": input, "desired": desired, "output": output,
+            "note": note, "extra": extra or {}}
 
 
 class Bias(ABC):
