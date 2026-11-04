@@ -24,6 +24,9 @@ judges:
   - {label: "GPT-oss-20b (low)",     provider: Alliance,   model: gpt-oss-20b, effort: low}
   - {label: "GPT-oss-20b (medium)",     provider: Alliance,   model: gpt-oss-20b, effort: medium}
   - {label: "GPT-oss-20b (high)",     provider: Alliance,   model: gpt-oss-20b, effort: high}
+  - {label: "GPT-oss-120b (low)",     provider: Alliance,   model: gpt-oss-120b, effort: low}
+  - {label: "GPT-oss-120b (medium)",     provider: Alliance,   model: gpt-oss-120b, effort: medium}
+  - {label: "GPT-oss-120b (high)",     provider: Alliance,   model: gpt-oss-120b, effort: high}
 
 biases: all                   # or a subset, e.g. [position, verbosity, cot]
 

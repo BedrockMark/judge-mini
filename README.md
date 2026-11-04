@@ -104,7 +104,8 @@ Every command also writes all log records (INFO and above, including warnings, e
 `<log_dir>/<command>_<YYYYmmdd_HHMMSS>.log`, one file per invocation.
 
 Every `run` and `plot` writes to a new `results/<YYYYmmdd_HHMMSS>/` folder, so earlier outputs are never overwritten:
-`summary.csv`, `bias_grid.png`, per-item `raw/<judge>/<bias>.jsonl` and `examples/` (run), or the merged `summary.csv`,
+`summary.csv`, `bias_grid.png`, per-item `raw/<judge>/<bias>.jsonl` and `examples/` plus zipped copies
+`raw.zip` and `examples.zip` (run), or the merged `summary.csv`,
 `bias_grid.png` and `sources.txt` (plot; with several `--run`, a later run wins on the same judge × bias).
 Only `results/cache/responses.jsonl` is shared across runs. Responses are cached by (provider, model, effort, params, prompt, repeat), so
 re-running costs nothing for finished work and failed calls are retried.

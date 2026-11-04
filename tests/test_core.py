@@ -1,5 +1,6 @@
 import asyncio
 import math
+import zipfile
 from pathlib import Path
 
 import pandas as pd
@@ -300,7 +301,11 @@ def test_each_command_writes_a_new_timestamped_folder(tmp_path):
     assert main(["run", *base, "--judge", "b"]) == 0
     first, second = runs()
     for d in (first, second):
-        assert {"summary.csv", "bias_grid.png", "raw", "examples"} <= {p.name for p in d.iterdir()}
+        assert {"summary.csv", "bias_grid.png", "raw", "examples", "raw.zip", "examples.zip"} <= {p.name for p in d.iterdir()}
+        for name in ("raw", "examples"):  # each zip holds exactly the folder's files, byte for byte
+            with zipfile.ZipFile(d / f"{name}.zip") as z:
+                files = {f.relative_to(d).as_posix(): f.read_bytes() for f in (d / name).rglob("*") if f.is_file()}
+                assert files and {n: z.read(n) for n in z.namelist() if not n.endswith("/")} == files
     assert (tmp_path / "results" / "cache" / "responses.jsonl").exists()  # cache stays shared
 
     assert main(["plot", *base, "--run", first.name, "--run", str(second)]) == 0

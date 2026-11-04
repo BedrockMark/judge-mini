@@ -1,11 +1,13 @@
 """Runs every (judge x bias) pair into a fresh results/<YYYYmmdd_HHMMSS>/ folder: summary.csv, per-item
-raw/*.jsonl and per-call examples/<bias>/<judge>/{correct,wrong,invalid}.md. Only results/cache/ is shared."""
+raw/*.jsonl and per-call examples/<bias>/<judge>/{correct,wrong,invalid}.md, plus raw.zip and examples.zip copies of
+those two folders. Only results/cache/ is shared."""
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
 import re
+import shutil
 from datetime import datetime
 from pathlib import Path
 
@@ -89,4 +91,6 @@ async def run(cfg: Config, out_dir: Path, judge_filter: list[str] | None = None,
 
     summary = pd.DataFrame(rows, columns=SUMMARY_COLUMNS)
     summary.to_csv(out_dir / "summary.csv", index=False)
+    for name in ("raw", "examples"):  # zipped copies for easy download; the folders stay as they are
+        shutil.make_archive(str(out_dir / name), "zip", root_dir=out_dir, base_dir=name)
     return summary
