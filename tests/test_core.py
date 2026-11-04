@@ -307,7 +307,8 @@ def test_each_command_writes_a_new_timestamped_folder(tmp_path):
             with zipfile.ZipFile(d / f"{name}.zip") as z:
                 files = {f.relative_to(d).as_posix(): f.read_bytes() for f in (d / name).rglob("*") if f.is_file()}
                 assert files and {n: z.read(n) for n in z.namelist() if not n.endswith("/")} == files
-    assert (tmp_path / "results" / "cache" / "responses.jsonl").exists()  # cache stays shared
+        assert not (d / "cache").exists()  # per-run cache is deleted when the run finishes
+    assert not (tmp_path / "results" / "cache").exists()  # nothing shared across runs
 
     assert main(["plot", *base, "--run", first.name, "--run", str(second)]) == 0
     merged = runs()[-1]

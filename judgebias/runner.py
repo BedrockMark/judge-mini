@@ -1,6 +1,7 @@
 """Runs every (judge x bias) pair into a fresh results/<YYYYmmdd_HHMMSS>/ folder: summary.csv, per-item
 raw/*.jsonl and per-call examples/<bias>/<judge>/{correct,wrong,invalid}.md, plus raw.zip and examples.zip copies of
-those two folders. Only results/cache/ is shared."""
+those two folders. Each run starts with an empty response cache (only deduplicates calls within the run) and deletes it
+when done, so nothing is reused from earlier runs."""
 from __future__ import annotations
 
 import asyncio
@@ -74,7 +75,8 @@ async def run(cfg: Config, out_dir: Path, judge_filter: list[str] | None = None,
     if not judges or not biases:
         raise ValueError("Nothing to run: check --judge / --bias filters")
 
-    cache = ResponseCache(cfg.results_dir / "cache" / "responses.jsonl")
+    cache_dir = out_dir / "cache"  # out_dir is new, so this cache starts empty
+    cache = ResponseCache(cache_dir / "responses.jsonl")
     ctx = Context(cfg, build_clients(cfg, keys), cache)
 
     async def one(judge, bias_name):
@@ -99,6 +101,7 @@ async def run(cfg: Config, out_dir: Path, judge_filter: list[str] | None = None,
         rows = await asyncio.gather(*(one(j, b) for j in judges for b in biases))
     finally:
         cache.close()
+        shutil.rmtree(cache_dir, ignore_errors=True)
     for row in rows:  # after gather: Self-Enhancement bills other judges' scoring calls to their own rows
         u = ctx.usage.get((row["judge"], row["bias"]))
         row["calls"], row["out_tokens"] = (u.known, u.mean_output_tokens) if u else (0, math.nan)

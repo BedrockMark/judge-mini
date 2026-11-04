@@ -103,7 +103,7 @@ config.yaml / config.fake.yaml   real and offline configs
 judgebias/
   config.py       config models, .env loading, key matching
   check.py        pre-flight check with live test calls
-  llm/            protocol adapters (openai, anthropic, fake), JSONL response cache
+  llm/            protocol adapters (openai, anthropic, fake), per-run JSONL response cache
   context.py      cached, concurrency-limited `ask` shared by all biases
   data.py, prompts.py, parse.py, metrics.py
   biases/         one module/registration per panel; registry is `BIASES`
@@ -120,8 +120,9 @@ Every `run` and `plot` writes to a new `results/<YYYYmmdd_HHMMSS>/` folder, so e
 `summary.csv`, the figures (see below), per-item `raw/<judge>/<bias>.jsonl` and `examples/` plus zipped copies
 `raw.zip` and `examples.zip` (run), or the merged `summary.csv`,
 the figures and `sources.txt` (plot; with several `--run`, a later run wins on the same judge × bias).
-Only `results/cache/responses.jsonl` is shared across runs. Responses are cached by (provider, model, effort, params, prompt, repeat), so
-re-running costs nothing for finished work and failed calls are retried.
+Nothing is reused between runs: every `run` calls the APIs afresh. Within one run, responses are cached by
+(provider, model, effort, params, prompt, repeat) in `results/<YYYYmmdd_HHMMSS>/cache/` so identical calls are made
+once; that cache is deleted when the run finishes (or fails).
 
 `examples/<bias>/<judge>/{correct,wrong,invalid}.md` hold up to 5 example calls each (input prompt, desired
 output, actual output), under a table with that judge's correct/wrong/invalid counts for the bias:
@@ -152,8 +153,7 @@ was cached; Self-Enhancement scoring calls are billed to the judge that scored. 
 and a group's judges are joined by a gray line in effort order (`minimal` < `low` < `medium` < `high` < `xhigh` < `max`).
 
 `summary.csv` carries `group`, `samples`, `n_correct`, `n_wrong` (invalid = the rest), `correctness`, `calls` (calls with a known token count) and `out_tokens` (mean output tokens
-per call). Token counts are stored in the response cache; cache entries written before this was added have none, so
-those calls are left out of `out_tokens` (a warning is logged), and a judge × bias with no known count is skipped in
+per call). Token counts are stored in the response cache; calls without a reported count are left out of `out_tokens` (a warning is logged), and a judge × bias with no known count is skipped in
 the cost plots.
 
 ## Extending
