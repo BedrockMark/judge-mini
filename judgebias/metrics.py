@@ -5,11 +5,12 @@ import math
 from collections.abc import Sequence
 
 
-def robustness_rate(pairs: Sequence[tuple[str | None, str | None]]) -> float:
-    """Fraction of (original, perturbed) choices that agree; invalid counts as not robust."""
+def robustness_rate(pairs: Sequence[tuple[str | None, str | None]], expect_change: bool = False) -> float:
+    """Fraction of (original, perturbed) choices that agree; invalid counts as not robust.
+    With expect_change (Fallacy-Oversight, paper App. C) a pair is robust when the choices differ instead."""
     if not pairs:
         return math.nan
-    return sum(o is not None and o == p for o, p in pairs) / len(pairs)
+    return sum(o is not None and p is not None and (o != p) == expect_change for o, p in pairs) / len(pairs)
 
 
 def consistency_rate(repeats: Sequence[Sequence[str | None]]) -> float:

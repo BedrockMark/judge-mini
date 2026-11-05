@@ -7,7 +7,7 @@ import pandas as pd
 import pytest
 
 from judgebias.biases import BIASES
-from judgebias.biases.pairwise import base_prompt, to_answer
+from judgebias.biases.pairwise import Variant, base_prompt, to_answer
 from judgebias.config import Config, ConfigError, load_config, parse_config, resolve_keys
 from judgebias.context import Context
 from judgebias.llm import ResponseCache, build_clients
@@ -436,3 +436,28 @@ def test_summary_counts_every_sample(tmp_path):
     assert (s["correctness"] == s["n_correct"] / s["samples"]).all()
     assert (s["n_correct"] + s["n_wrong"] <= s["samples"]).all() and set(s["group"]) == {"G"}
     assert s.loc[("G (high)", "cot"), "out_tokens"] > s.loc[("G (low)", "cot"), "out_tokens"]
+
+
+def test_pairwise_correctness_is_against_the_ground_truth_not_the_unperturbed_verdict():
+    plain, swapped = Variant("x", "p"), Variant("swapped", "p", swapped=True)
+    pos, fal = BIASES["position"], BIASES["fallacy_oversight"]
+    # answer 1 wins -> correct, even if the unperturbed verdict was answer 2 or unparsable
+    assert pos._sample(0, plain, "[[A]]", "2", "1", "")["status"] == "correct"
+    assert pos._sample(0, plain, "[[A]]", None, "1", "")["status"] == "correct"
+    # consistent with the unperturbed verdict but picks answer 2 -> wrong
+    assert pos._sample(0, plain, "[[B]]", "2", "2", "")["status"] == "wrong"
+    # position swap: answer 1 is shown as B
+    s = pos._sample(0, swapped, "[[B]]", "1", "1", "")
+    assert s["status"] == "correct" and s["desired"].startswith("[[B]]")
+    assert pos._sample(0, plain, None, "1", None, "")["status"] == "invalid"
+    # fallacy-oversight: answer 1 is ruined, so answer 2 ([[B]]) is correct
+    s = fal._sample(0, plain, "[[B]]", "1", "2", "")
+    assert s["status"] == "correct" and s["desired"].startswith("[[B]]")
+    assert fal._sample(0, plain, "[[A]]", "1", "1", "")["status"] == "wrong"
+
+
+def test_robustness_rate_expects_a_change_for_fallacy_oversight():
+    pairs = [("1", "1"), ("1", "2"), ("2", "1"), (None, "1"), ("1", None)]
+    assert robustness_rate(pairs) == 1 / 5
+    assert robustness_rate(pairs, expect_change=True) == 2 / 5
+    assert BIASES["fallacy_oversight"].expect_change and not BIASES["position"].expect_change

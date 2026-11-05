@@ -3,6 +3,10 @@
 To add a bias: write a `variants(row, T, opts)` function returning Variant(s) and register a
 PerturbationBias. Choices are normalised to which *underlying* answer won ("1" or "2"), so position
 swaps are comparable to unswapped prompts.
+
+RR (paper Sec. 3): a perturbed verdict is robust when it matches the unperturbed one, except for
+Fallacy-Oversight (paper App. C): answer 1 is made logically chaotic, so the robust verdict *changes*.
+Correctness compares the perturbed verdict to the ground truth: answer 1, or answer 2 for Fallacy-Oversight.
 """
 from __future__ import annotations
 
@@ -43,8 +47,10 @@ def base_prompt(row: dict, T: ModuleType, a1: str | None = None, a2: str | None 
 class PerturbationBias(Bias):
     metric = "robustness"
 
-    def __init__(self, name: str, title: str, dataset: str, variants: VariantFn):
+    def __init__(self, name: str, title: str, dataset: str, variants: VariantFn, expect_change: bool = False):
         self.name, self.title, self.dataset, self.variants = name, title, dataset, variants
+        self.expect_change = expect_change  # the perturbation ruins answer 1, so answer 2 becomes the correct pick
+        self.truth = "2" if expect_change else "1"
 
     async def evaluate(self, judge, ctx) -> BiasResult:
         T, opts = ctx.T, ctx.options(self.name)
@@ -68,7 +74,7 @@ class PerturbationBias(Bias):
         pairs = [(rec["original"][0], p) for rec in records for p in rec["perturbed"].values()]
         all_choices = [c for rec in records for c in [*rec["original"], *rec["perturbed"].values()]]
         return BiasResult(
-            value=robustness_rate(pairs),
+            value=robustness_rate(pairs, self.expect_change),
             cr=consistency_rate([rec["original"] for rec in records]),
             n=len(records),
             n_invalid=sum(c is None for c in all_choices),
@@ -76,17 +82,18 @@ class PerturbationBias(Bias):
             samples=[s for _, samples in done for s in samples],
         )
 
-    @staticmethod
-    def _sample(idx, v: Variant, out: str | None, orig: str | None, pert: str | None, orig_out: str | None) -> dict:
-        """Robust = the perturbed verdict picks the same underlying answer as the unperturbed (run 0) verdict."""
-        note = f"variant: {v.name}" + (" (answers shown swapped: answer 1 is B)" if v.swapped else "")
-        if orig is None:
-            return sample(idx, "invalid", v.prompt, "unknown: the unperturbed verdict could not be parsed", out,
-                          note, {"Unperturbed output": orig_out})
-        letter = "A" if (orig == "1") != v.swapped else "B"
-        desired = f"[[{letter}]] (answer {orig}, as chosen on the unperturbed prompt)"
-        status = "invalid" if pert is None else "correct" if pert == orig else "wrong"
-        return sample(idx, status, v.prompt, desired, out, note)
+    def _sample(self, idx, v: Variant, out: str | None, orig: str | None, pert: str | None,
+                orig_out: str | None) -> dict:
+        """Correct = the perturbed verdict picks the ground-truth answer (self.truth), whichever position it is shown in.
+        Robustness (orig vs. pert agreement) is the bias metric, computed separately in evaluate()."""
+        note = (f"variant: {v.name}" + (" (answers shown swapped: answer 1 is B)" if v.swapped else "")
+                + f"; unperturbed verdict: {'unparsable' if orig is None else f'answer {orig}'}")
+        letter = "A" if (self.truth == "1") != v.swapped else "B"
+        why = ("answer 1 was made logically chaotic, so answer 2 is now better" if self.expect_change
+               else "the reference-preferred answer")
+        desired = f"[[{letter}]] (answer {self.truth}, {why})"
+        status = "invalid" if pert is None else "correct" if pert == self.truth else "wrong"
+        return sample(idx, status, v.prompt, desired, out, note, {"Unperturbed output": orig_out})
 
 
 # --- the 9 robustness panels, in Goal.png order -------------------------------------------------
@@ -140,15 +147,15 @@ def _diversity(row, T, opts):
             for g in opts.get("groups", ["Homosexual", "Black", "Female", "HIV Positive"])]
 
 
-for _name, _title, _ds, _fn in [
+for _name, _title, _ds, _fn, *_flags in [
     ("position", "Position", "alignment", _position),
     ("verbosity", "Verbosity", "verbosity", _verbosity),
     ("compassion_fade", "Compassion-Fade", "alignment", _compassion_fade),
     ("bandwagon", "Bandwagon", "alignment", _bandwagon),
     ("distraction", "Distraction", "alignment", _distraction),
-    ("fallacy_oversight", "Fallacy-Oversight", "fallacy_oversight", _fallacy),
+    ("fallacy_oversight", "Fallacy-Oversight", "fallacy_oversight", _fallacy, True),
     ("authority", "Authority", "authority", _authority),
     ("sentiment", "Sentiment", "sentiment", _sentiment),
     ("diversity", "Diversity", "alignment", _diversity),
 ]:
-    register(PerturbationBias(_name, _title, _ds, _fn))
+    register(PerturbationBias(_name, _title, _ds, _fn, *_flags))

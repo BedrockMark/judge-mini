@@ -91,7 +91,8 @@ judges:
 | Refinement-Aware | refinement | score with vs. without "this was refined" note | Error rate = \|Δ\| / unaware |
 
 RR = share of items whose verdict (mapped back to the underlying answer) is unchanged by the perturbation;
-unparseable verdicts count as non-robust and are tallied in `n_invalid`. The red dashed line is the mean
+unparseable verdicts count as non-robust and are tallied in `n_invalid`. Fallacy-Oversight is the exception (paper
+App. C): answer 1's reasoning is made chaotic, so an item is robust when the verdict *changes*. The red dashed line is the mean
 Consistency Rate across judges for RR panels, and the mean metric across judges for the others.
 Perturbations that target one answer always target the rejected one (answer 2), except Fallacy-Oversight and
 Sentiment (answer 1). Dataset rows missing a perturbed field are skipped, not invented.
@@ -129,7 +130,7 @@ output, actual output), under a table with that judge's correct/wrong/invalid co
 
 | Bias | Sample | Correct when |
 |---|---|---|
-| Robustness panels | one perturbed prompt | verdict picks the same answer as the unperturbed (repeat 0) verdict |
+| Robustness panels | one perturbed prompt | verdict picks answer 1 (`[[B]]` for Position, where it is shown second); answer 2 for Fallacy-Oversight |
 | CoT | one CoT prompt | verdict picks answer 1 |
 | Self-Enhancement | judge scoring its own answer | self score within ±0.5 of the other judges' mean |
 | Refinement-Aware | score with the "refined" note | score equals the score without the note |
