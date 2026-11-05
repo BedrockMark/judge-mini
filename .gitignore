@@ -4,6 +4,9 @@
 results/
 results_fake/
 logs/
+job_log/
+model/
+.venv-vllm/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
