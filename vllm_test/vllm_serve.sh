@@ -17,6 +17,10 @@ set -euo pipefail
 cd "$SLURM_SUBMIT_DIR"
 : "${MODEL_DIR:?} ${SERVED_NAME:?} ${VLLM_API_KEY:?} ${VLLM_VENV:?}"
 
+# vLLM JIT-compiles FlashInfer kernels with nvcc + ninja; compute nodes have no /usr/local/cuda.
+command -v nvcc >/dev/null || module load cuda
+export CUDA_HOME=${CUDA_HOME:-$(dirname "$(dirname "$(command -v nvcc)")")}
+
 source "$VLLM_VENV/bin/activate"
 export HF_HOME=$PWD/model/.hf_home HF_HUB_OFFLINE=1 PYTHONUNBUFFERED=1
 

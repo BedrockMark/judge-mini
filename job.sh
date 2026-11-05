@@ -7,7 +7,7 @@
 #SBATCH --mem=8G
 #SBATCH --time=48:00:00                 # 3 judges x all biases took ~1.5h locally
 #SBATCH --mail-type=begin,end,fail
-#SBATCH --mail-user=YOUR_EMAIL
+#SBATCH --mail-user=mark13@ualberta.ca
 
 # Usage:
 #   sbatch job.sh                                   # check, then run with config.yaml

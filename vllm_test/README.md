@@ -14,11 +14,14 @@
 salloc --gres=gpu:1 --cpus-per-task=8 --mem=32G --time=00:59:00
 cd <项目根目录>
 uv venv .venv-vllm --python 3.12
-uv pip install --python .venv-vllm vllm
+uv pip install --python .venv-vllm vllm ninja   # ninja：FlashInfer JIT 编译需要
 exit
 ```
 
 vLLM 装在单独的 `.venv-vllm` 里，不影响项目的 `.venv`。
+
+vLLM 启动时会用 `nvcc` 现场编译 FlashInfer kernel，计算节点没有 `/usr/local/cuda`，所以 `vllm_serve.sh` 会自动 `module load cuda`
+（否则报 `Could not find nvcc and default cuda_home='/usr/local/cuda' doesn't exist`）。
 
 ## 运行
 
