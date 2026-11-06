@@ -24,6 +24,9 @@ def main(argv: list[str] | None = None) -> int:
         sp = sub.add_parser(name, help=help_)
         sp.add_argument("--config", default="config.yaml")
         sp.add_argument("--log-dir", help="directory for the log file (default: <results_dir>/logs)")
+        if name in ("check", "run"):
+            sp.add_argument("--model", action="append",
+                            help="only judges with this model ID (repeatable), e.g. the one a vLLM job serves")
         if name == "check":
             sp.add_argument("--no-call", action="store_true", help="skip the live test calls")
         if name == "run":
@@ -41,6 +44,10 @@ def main(argv: list[str] | None = None) -> int:
     out_dir = None
     try:
         cfg = load_config(args.config)
+        if getattr(args, "model", None):
+            cfg.judges = [j for j in cfg.judges if j.model in args.model]
+            if not cfg.judges:
+                raise ConfigError(f"No judge in {args.config} uses model {args.model}")
         log_dir = Path(args.log_dir) if args.log_dir else cfg.log_dir
         log_dir.mkdir(parents=True, exist_ok=True)
         log_path = log_dir / f"{args.cmd}_{datetime.now():%Y%m%d_%H%M%S}.log"

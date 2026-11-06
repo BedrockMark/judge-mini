@@ -18,6 +18,8 @@ class Completion(str):
 class ChatClient(ABC):
     """One protocol adapter. Implementations translate `effort` into their own request params."""
 
+    replicas: int = 1  # identical servers behind this client; the per-model concurrency cap scales with it
+
     @abstractmethod
     async def complete(
         self, model: str, prompt: str, effort: str | None, max_tokens: int, params: dict[str, Any]

@@ -1,0 +1,32 @@
+# Same experiment as config.yaml, but judges are served by our own vLLM job (vllm_job.sh) instead of the API.
+# The job sets VLLM_BASE_URL (one URL per replica) / VLLM_API_KEY and passes --model <served model>,
+# so only that model's judges run.
+# `model` must be the HF model ID given to vllm_job.sh (it is also the vLLM --served-model-name).
+dataset_dir: LLM-Judge-Bias-Dataset
+env_file: .env
+results_dir: results
+samples_per_bias: 150
+seed: 0
+concurrency: 64               # unused here: the vllm provider sets its own below
+cr_repeats: 4
+max_tokens: 16000             # prompt + max_tokens must fit vLLM's --max-model-len (vllm_job.sh: 32768)
+
+providers:
+  # concurrency is per replica, 1.5x vLLM's --max-num-seqs (vllm_job.sh MAX_NUM_SEQS=256) so a short queue
+  # inside vLLM refills every freed batch slot at once. The long timeout covers that queueing plus slow
+  # 16k-token generations in a full batch; a timeout would resend the request and redo the work.
+  vllm: {protocol: openai, base_url_env: VLLM_BASE_URL, api_key_env: VLLM_API_KEY, concurrency: 384, timeout: 14400}
+
+judges:
+  # Labels match config.yaml, so API and vLLM runs can be merged with `plot --run`.
+  - {label: "GPT-oss-20b",     provider: vllm,   model: openai/gpt-oss-20b, effort: [low, medium, high]}
+  - {label: "GPT-oss-120b",    provider: vllm,   model: openai/gpt-oss-120b, effort: [low, medium, high]}
+
+biases: all
+
+bias_options:
+  compassion_fade: {model_names: ["GPT-4o", "Claude-3.5-Sonnet"]}
+  bandwagon: {number: 90}
+  diversity: {groups: ["Homosexual", "Black", "Female", "HIV Positive"]}
+
+log_dir: logs

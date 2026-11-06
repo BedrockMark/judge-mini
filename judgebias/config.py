@@ -16,10 +16,13 @@ class ConfigError(ValueError):
 
 class ProviderSpec(BaseModel):
     protocol: Literal["openai", "anthropic", "fake"]
-    base_url: str | None = None
+    base_url: str | None = None  # openai protocol: several comma-separated replicas are load-balanced
+    base_url_env: str | None = None  # read base_url from this env variable instead (e.g. a vLLM job's address)
     api_key_env: str | None = None  # name of the variable in .env, never the key itself
     token_param: str = "max_completion_tokens"  # openai protocol only; some compat servers want max_tokens
     rpm: int | None = None  # client-side cap on requests per 60 s, shared by every judge on this provider (key)
+    concurrency: int | None = None  # per-model in-flight cap per replica (base URL); default: global concurrency
+    timeout: float = 600  # seconds per request (openai protocol), incl. time queued inside the server
 
 
 class JudgeSpec(BaseModel):
@@ -120,7 +123,8 @@ def require_dataset(cfg: Config) -> None:
 def resolve_keys(cfg: Config) -> dict[str, str | None]:
     """Load .env and return {provider_name: api_key} for every provider a judge uses.
 
-    Raises ConfigError listing every missing key before any API call is made.
+    Also fills base_url of providers that set base_url_env.
+    Raises ConfigError listing every missing key/URL before any API call is made.
     """
     if cfg.env_file is not None and cfg.env_file.exists():
         load_dotenv(cfg.env_file, override=False)
@@ -131,6 +135,12 @@ def resolve_keys(cfg: Config) -> dict[str, str | None]:
         if spec.protocol == "fake":
             keys[name] = None
             continue
+        if spec.base_url_env:
+            url = os.environ.get(spec.base_url_env, "").strip()
+            if url:
+                spec.base_url = url
+            else:
+                missing.append(f"{spec.base_url_env} (base URL of provider '{name}')")
         if not spec.api_key_env:
             missing.append(f"provider '{name}' has no api_key_env")
             continue
@@ -140,5 +150,5 @@ def resolve_keys(cfg: Config) -> dict[str, str | None]:
             continue
         keys[name] = key
     if missing:
-        raise ConfigError(f"Missing API keys in {cfg.env_file}: " + ", ".join(missing))
+        raise ConfigError(f"Missing API keys/URLs in {cfg.env_file}: " + ", ".join(missing))
     return keys

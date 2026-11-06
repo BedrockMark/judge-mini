@@ -13,7 +13,7 @@ def build_clients(cfg: Config, keys: dict[str, str | None]) -> dict[str, ChatCli
     for name in keys:
         spec = cfg.providers[name]
         if spec.protocol == "openai":
-            clients[name] = OpenAIProtocolClient(keys[name], spec.base_url, spec.token_param)
+            clients[name] = OpenAIProtocolClient(keys[name], spec.base_url, spec.token_param, spec.timeout)
         elif spec.protocol == "anthropic":
             clients[name] = AnthropicProtocolClient(keys[name], spec.base_url)
         else:

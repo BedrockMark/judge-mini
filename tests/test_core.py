@@ -111,8 +111,119 @@ def test_unused_provider_needs_no_key(tmp_path, monkeypatch):
     assert resolve_keys(cfg) == {"fake": None}
 
 
+def test_base_url_read_from_env_var(tmp_path, monkeypatch):
+    monkeypatch.setenv("TEST_VLLM_KEY", "k")
+    monkeypatch.delenv("TEST_VLLM_URL", raising=False)
+    providers = {"vllm": {"protocol": "openai", "base_url_env": "TEST_VLLM_URL", "api_key_env": "TEST_VLLM_KEY"}}
+    cfg = make_cfg(tmp_path, providers=providers, judges=[{"label": "x", "provider": "vllm", "model": "m"}])
+    with pytest.raises(ConfigError, match="TEST_VLLM_URL"):
+        resolve_keys(cfg)
+    monkeypatch.setenv("TEST_VLLM_URL", "http://node:1234/v1")
+    resolve_keys(cfg)
+    assert cfg.providers["vllm"].base_url == "http://node:1234/v1"
+
+
+def test_model_filter_keeps_only_served_model(tmp_path, capsys):
+    import yaml
+    from judgebias.__main__ import main
+    cfg = {"dataset_dir": str(DATASET), "env_file": None, "results_dir": str(tmp_path / "results"),
+           "providers": {"fake": {"protocol": "fake"}},
+           "judges": [{"label": "a", "provider": "fake", "model": "m1", "effort": ["low", "high"]},
+                      {"label": "b", "provider": "fake", "model": "m2"}]}
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+    base = ["--config", str(path), "--log-dir", str(tmp_path / "logs")]
+    assert main(["check", *base, "--model", "m1"]) == 0
+    assert "2 judge(s)" in capsys.readouterr().out
+    assert main(["check", *base, "--model", "nope"]) == 2
+
+
+def test_priority_gate_releases_lowest_priority_first():
+    from judgebias.llm import PriorityGate
+
+    async def main():
+        gate, order = PriorityGate(1), []
+        await gate.acquire(0)  # occupy the only slot so the rest queue up
+
+        async def waiter(name, prio):
+            await gate.acquire(prio)
+            order.append(name)
+            gate.release()
+
+        tasks = [asyncio.create_task(waiter(n, p)) for n, p in [("low1", 2), ("high", 0), ("low2", 2), ("mid", 1)]]
+        await asyncio.sleep(0)
+        tasks[2].cancel()  # a cancelled waiter must not swallow a slot
+        await asyncio.sleep(0)
+        gate.release()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        return order
+
+    assert asyncio.run(main()) == ["high", "mid", "low1"]
+
+
+def test_openai_client_spreads_requests_over_replicas():
+    client = OpenAIProtocolClient("k", "http://a/v1, http://b/v1", timeout=7200)
+    assert client.replicas == 2
+    assert [str(c.base_url) for c in client._clients] == ["http://a/v1/", "http://b/v1/"]
+    assert client._clients[0].timeout == 7200
+    seen = []
+
+    class Replica:
+        def __init__(self, name):
+            self.chat = self.completions = self
+            self.name = name
+
+        async def create(self, **kw):
+            seen.append(self.name)
+            await asyncio.sleep(0.01)
+            msg = type("M", (), {"content": "[[A]]"})
+            return type("R", (), {"choices": [type("C", (), {"message": msg})], "usage": None})
+
+    client._clients = [Replica("a"), Replica("b")]
+
+    async def main():
+        await asyncio.gather(*(client.complete("m", "p", None, 10, {}) for _ in range(4)))
+
+    asyncio.run(main())
+    assert sorted(seen) == ["a", "a", "b", "b"]  # least-in-flight: never 3 on one replica
+
+
+def test_concurrency_scales_with_replicas_and_high_effort_goes_first(tmp_path):
+    class Probe(FakeClient):
+        replicas = 2
+
+        def __init__(self):
+            self.inflight = self.peak = 0
+            self.efforts = []
+
+        async def complete(self, model, prompt, effort, max_tokens, params):
+            self.inflight += 1
+            self.peak = max(self.peak, self.inflight)
+            self.efforts.append(effort)
+            await asyncio.sleep(0.01)
+            self.inflight -= 1
+            return "[[A]]"
+
+    cfg = make_cfg(tmp_path, concurrency=99,
+                   providers={"fake": {"protocol": "fake", "concurrency": 1}},
+                   judges=[{"label": "j", "provider": "fake", "model": "m", "effort": ["low", "high"]}])
+    client = Probe()
+    cache = ResponseCache(tmp_path / "c.jsonl")
+    ctx = Context(cfg, {"fake": client}, cache)
+    low, high = cfg.judges
+
+    async def main():
+        await asyncio.gather(*(ctx.ask(j, f"p{i}") for i in range(4) for j in (low, high)))
+
+    asyncio.run(main())
+    cache.close()
+    assert client.peak == 2  # provider concurrency (1) x replicas (2), not the global 99
+    assert client.efforts[:2] == ["low", "high"]  # first two take the free slots in arrival order
+    assert client.efforts[2:5] == ["high"] * 3  # then every queued high-effort call before the low ones
+
+
 def test_repo_configs_load():
-    for name in ("config.yaml", "config.fake.yaml"):
+    for name in ("config.yaml", "config.fake.yaml", "config.vllm.yaml"):
         cfg = load_config(ROOT / name)
         assert cfg.dataset_dir.exists()
         assert cfg.selected_biases()

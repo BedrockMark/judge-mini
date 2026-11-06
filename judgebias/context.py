@@ -9,10 +9,14 @@ from types import ModuleType
 
 from .config import Config, JudgeSpec
 from .data import load_dataset
-from .llm import ChatClient, RateLimiter, ResponseCache, cache_key
+from .llm import ChatClient, PriorityGate, RateLimiter, ResponseCache, cache_key
 from .prompts import load_templates
 
 log = logging.getLogger(__name__)
+
+# Queued calls start in this order of effort (high first): the longest generations start early instead of
+# forming the run's tail. Efforts not listed (incl. None) rank as 0.
+EFFORT_ORDER = ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
 
 # The bias being evaluated; set by the runner so every `ask` (cache hits too) is billed to (asked judge, bias).
 current_bias: contextvars.ContextVar[str | None] = contextvars.ContextVar("current_bias", default=None)
@@ -38,7 +42,7 @@ class Context:
     usage: dict[tuple[str, str | None], Usage] = field(default_factory=dict)  # (judge label, bias) -> tokens
 
     def __post_init__(self) -> None:
-        self._sems: dict[tuple[str, str], asyncio.Semaphore] = {}  # one per (provider, model): each is its own server
+        self._gates: dict[tuple[str, str], PriorityGate] = {}  # one per (provider, model): each is its own server
         self._limiters = {name: RateLimiter(p.rpm) for name, p in self.cfg.providers.items() if p.rpm}
         self._inflight: dict[str, asyncio.Task] = {}
 
@@ -81,9 +85,14 @@ class Context:
 
     async def _call(self, key: str, judge: JudgeSpec, prompt: str, run_idx: int) -> str | None:
         client = self.clients[judge.provider]
-        sem = self._sems.setdefault((judge.provider, judge.model), asyncio.Semaphore(self.cfg.concurrency))
+        gate = self._gates.get((judge.provider, judge.model))
+        if gate is None:
+            per_replica = self.cfg.providers[judge.provider].concurrency or self.cfg.concurrency
+            gate = self._gates[(judge.provider, judge.model)] = PriorityGate(per_replica * client.replicas)
         limiter = self._limiters.get(judge.provider)
-        async with sem:
+        effort = str(judge.effort).lower()
+        await gate.acquire(-(EFFORT_ORDER.index(effort) if effort in EFFORT_ORDER else 0))
+        try:
             attempt = throttled = 0
             while attempt < 3:
                 if limiter:
@@ -108,5 +117,7 @@ class Context:
                     attempt += 1
                     log.warning("%s attempt %d failed: %s", judge.label, attempt, e)
                     await asyncio.sleep(2 ** attempt)
+        finally:
+            gate.release()
         self.stats["errors"] += 1
         return None
