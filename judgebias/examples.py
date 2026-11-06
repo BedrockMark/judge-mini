@@ -19,13 +19,17 @@ def _fence(text: str | None) -> str:
 def render(judge, bias, status: str, samples: list[dict], k: int) -> str:
     counts = {s: sum(x["status"] == s for x in samples) for s in STATUSES}
     shown = [x for x in samples if x["status"] == status][:k]
+    rows = len({x["idx"] for x in samples})
     lines = [
         f"# {bias.title}: {status} examples for {judge.label}",
         "",
-        "| Judge | Model | Effort | Bias | Correct | Wrong | Invalid | Total |",
-        "|---|---|---|---|---|---|---|---|",
+        "| Judge | Model | Effort | Bias | Correct | Wrong | Invalid | Total | Rows |",
+        "|---|---|---|---|---|---|---|---|---|",
         f"| {judge.label} | {judge.model} | {judge.effort} | {bias.name} | {counts['correct']} | {counts['wrong']} "
-        f"| {counts['invalid']} | {len(samples)} |",
+        f"| {counts['invalid']} | {len(samples)} | {rows} |",
+        "",
+        "Total counts judged samples; a bias with several perturbations per dataset row "
+        "(e.g. sentiment tones, authority kinds, diversity groups) yields several samples per row.",
         "",
         f"Showing {len(shown)} of {counts[status]} {status} examples.",
     ]
