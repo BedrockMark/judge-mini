@@ -7,7 +7,7 @@
 #SBATCH --mem=8G
 #SBATCH --time=48:00:00                 # 3 judges x all biases took ~1.5h locally
 #SBATCH --mail-type=begin,end,fail
-#SBATCH --mail-user=mark13@ualberta.ca
+# Mail address: EMAIL in .env, passed to sbatch by the login-node half below.
 
 # Usage (login node; `bash` freezes the config now and then submits itself, so the config can be edited and another
 # test submitted while this one is still queued):
@@ -27,6 +27,9 @@ if [[ -z ${SLURM_JOB_ID:-} ]]; then
     # ------------------------------------------------------------ login node: snapshot the config, then submit
     cd "$(dirname "$0")"
     mkdir -p job_log
+    # Notification address: EMAIL=... in .env (sbatch reads SBATCH_MAIL_USER as --mail-user).
+    email=$(sed -n 's/^EMAIL=//p' .env 2>/dev/null | tr -d '\r"' | tail -1) || true
+    [[ -z $email || -n ${SBATCH_MAIL_USER:-} ]] || export SBATCH_MAIL_USER=$email
     args=("$@") config=config.yaml at= out_dir=() out=
     for i in "${!args[@]}"; do
         case ${args[i]} in

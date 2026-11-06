@@ -27,6 +27,9 @@
 
 set -euo pipefail
 cd "$(dirname "$0")"
+# Notification address: EMAIL=... in .env (sbatch reads SBATCH_MAIL_USER as --mail-user).
+email=$(sed -n 's/^EMAIL=//p' .env 2>/dev/null | tr -d '\r"' | tail -1) || true
+[[ -z $email || -n ${SBATCH_MAIL_USER:-} ]] || export SBATCH_MAIL_USER=$email
 # vllm_job.sh settings a resume reuses unless they are set again.
 SAVED_ENV=(JOB_TIME GPUS GPU_TYPE GPU_MEM_GB CPUS MEM TP MAX_MODEL_LEN MAX_NUM_SEQS VLLM_EXTRA_ARGS READY_TIMEOUT VLLM_VENV)
 GIVEN_JOB_TIME=${JOB_TIME:-}

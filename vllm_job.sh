@@ -4,8 +4,7 @@
 #SBATCH --error=./job_log/%j.err
 #SBATCH --ntasks=1
 #SBATCH --mail-type=begin,end,fail
-#SBATCH --mail-user=mark13@ualberta.ca
-# GPUs, CPUs, memory and time are set on the sbatch command line by the login-node half below.
+# GPUs, CPUs, memory, time and the mail address (EMAIL in .env) are passed to sbatch by the login-node half below.
 
 # One job runs everything: vLLM server(s) on the job's GPUs + the judgebias client against them.
 #
@@ -48,6 +47,9 @@ if [[ ${VLLM_JOB_STAGE:-} != run ]]; then
         fi
     done
     mkdir -p job_log model
+    # Notification address: EMAIL=... in .env (sbatch reads SBATCH_MAIL_USER as --mail-user).
+    email=$(sed -n 's/^EMAIL=//p' .env 2>/dev/null | tr -d '\r"' | tail -1) || true
+    [[ -z $email || -n ${SBATCH_MAIL_USER:-} ]] || export SBATCH_MAIL_USER=$email
 
     # Fail now, not after the queue, if the config is broken or has no judge for this model
     # (the real URL/key only exist inside the job, hence the placeholders).
