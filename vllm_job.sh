@@ -14,6 +14,7 @@
 #   bash vllm_job.sh openai/gpt-oss-120b                    # GPU count picked from the model size
 #   bash vllm_job.sh openai/gpt-oss-20b --bias position     # extra args go to `judgebias run`
 #   GPUS=4 bash vllm_job.sh                                 # more GPUs -> more replicas -> faster
+# For a full run prefer vllm_split.sh: same experiment as 3 shorter jobs (start sooner) + an automatic merge.
 #
 # Inside the job, TP = the smallest tensor-parallel size whose weights fit in 70% of one GPU (the rest is KV
 # cache); every further group of TP GPUs runs an independent replica, and the client load-balances over them.
@@ -21,6 +22,9 @@
 # Env overrides (login node): CONFIG (config.vllm.yaml), GPUS (auto), GPU_TYPE (any), GPU_MEM_GB (48, for the
 #   auto GPU count), JOB_TIME (24:00:00), CPUS (8/GPU), MEM (32G + 32G/GPU), TP (auto), MAX_MODEL_LEN (32768),
 #   MAX_NUM_SEQS (256 per replica), VLLM_EXTRA_ARGS, READY_TIMEOUT (1800 s), VLLM_VENV (.venv-vllm).
+# The job runs with a snapshot of CONFIG taken at submission, so CONFIG can be edited and resubmitted for another
+# test while this one is still queued. The snapshot is the run's results/<timestamp>/config.yaml (folder created at
+# submission, or the --out-dir given) and is kept there with the results.
 # Logs: job_log/<jobid>.out (client, last line result=PASS/FAIL), job_log/<jobid>_vllm<i>.log (replica i).
 
 set -uo pipefail
@@ -48,6 +52,19 @@ if [[ ${VLLM_JOB_STAGE:-} != run ]]; then
     # (the real URL/key only exist inside the job, hence the placeholders).
     VLLM_BASE_URL=http://placeholder VLLM_API_KEY=placeholder \
         .venv/bin/python -m judgebias check --config "$CONFIG" --model "$MODEL_ID" --no-call --log-dir job_log
+    # Freeze the config now (vllm_split.sh passes one it already froze): the job reads it only once it starts.
+    # The snapshot is the run's own results/<timestamp>/config.yaml and stays there with the results.
+    if ! head -1 "$CONFIG" | grep -q '^# judgebias config snapshot of '; then
+        out_dir=()
+        for ((i = 1; i <= $#; i++)); do
+            case ${!i} in
+                --out-dir) j=$((i + 1)); out_dir=(--out-dir "${!j:?--out-dir needs a folder}") ;;
+                --out-dir=*) out_dir=(--out-dir "${!i#--out-dir=}") ;;
+            esac
+        done
+        CONFIG=$(.venv/bin/python -m judgebias snapshot --config "$CONFIG" "${out_dir[@]}")
+        (( ${#out_dir[@]} )) || set -- "$@" --out-dir "$(dirname "$CONFIG")"
+    fi
 
     # Compute nodes may have no internet. original/ and metal/ are duplicate non-HF-format weights
     # (gpt-oss-120b: +130 GB) that vLLM never reads.
@@ -76,7 +93,7 @@ d(sys.argv[1], local_dir=sys.argv[2], ignore_patterns=["original/*", "metal/*"])
         --mem="${MEM:-$((32 + 32 * GPUS))G}" --time="${JOB_TIME:-24:00:00}" \
         --export="ALL,VLLM_JOB_STAGE=run,MODEL_ID=$MODEL_ID,CONFIG=$CONFIG,VLLM_VENV=$VLLM_VENV" \
         vllm_job.sh "$@" | cut -d';' -f1)
-    echo "Submitted job $JOB: $MODEL_ID (${WEIGHTS_GB} GB weights) on $GPUS GPU(s)"
+    echo "Submitted job $JOB: $MODEL_ID (${WEIGHTS_GB} GB weights) on $GPUS GPU(s), config snapshot $CONFIG"
     cat <<EOF
 
   squeue -u \$USER                     # status

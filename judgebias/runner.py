@@ -1,6 +1,5 @@
-"""Runs every (judge x bias) pair into a fresh results/<YYYYmmdd_HHMMSS>/ folder: summary.csv, per-item
-raw/*.jsonl and per-call examples/<bias>/<judge>/{correct,wrong,invalid}.md, plus raw.zip and examples.zip copies of
-those two folders. Each run starts with an empty response cache (only deduplicates calls within the run) and deletes it
+"""Runs every (judge x bias) pair into a fresh results/<YYYYmmdd_HHMMSS>/ folder: summary.csv and examples.zip
+(per-call examples/<bias>/<judge>/{correct,wrong,invalid}.md; the unzipped folder is deleted once zipped). Each run starts with an empty response cache (only deduplicates calls within the run) and deletes it
 when done, so nothing is reused from earlier runs."""
 from __future__ import annotations
 
@@ -52,6 +51,15 @@ def new_output_dir(cfg: Config) -> Path:
     raise RuntimeError(f"Could not create an output folder under {cfg.results_dir}")
 
 
+def given_output_dir(path: Path) -> Path:
+    """A caller-chosen output folder (e.g. one part of a split job); it must not exist yet, be empty, or hold only the
+    config snapshot a job script put there at submission."""
+    path.mkdir(parents=True, exist_ok=True)
+    if any(p.name != "config.yaml" for p in path.iterdir()):
+        raise FileExistsError(f"Output folder {path} is not empty")
+    return path
+
+
 def latest_output_dir(cfg: Config) -> Path:
     """Newest timestamped folder that has a summary.csv."""
     dirs = sorted(d for d in cfg.results_dir.glob("*") if RUN_DIR_RE.match(d.name) and (d / "summary.csv").exists())
@@ -64,6 +72,29 @@ def merge_summaries(dirs: list[Path]) -> pd.DataFrame:
     """Concatenate several runs' summaries; a later folder's (judge, bias) row replaces an earlier one."""
     df = pd.concat([pd.read_csv(d / "summary.csv") for d in dirs], ignore_index=True)
     return df.drop_duplicates(["judge", "bias"], keep="last").reset_index(drop=True)
+
+
+def zip_examples(out_dir: Path) -> None:
+    """out_dir/examples/ -> out_dir/examples.zip (holding the examples/ folder itself); the folder is then deleted."""
+    shutil.make_archive(str(out_dir / "examples"), "zip", root_dir=out_dir, base_dir="examples")
+    shutil.rmtree(out_dir / "examples")
+
+
+def merge_details(dirs: list[Path], out_dir: Path) -> None:
+    """Merge each run's examples.zip (or an older run's examples/ folder) into out_dir/examples.zip, later folder
+    winning per file. Files are per (judge, bias), so this matches merge_summaries when the runs split the biases or
+    judges. Older runs' raw/ and raw.zip are not carried over."""
+    found = False
+    for d in dirs:
+        if (d / "examples.zip").exists():
+            shutil.unpack_archive(d / "examples.zip", out_dir)  # the zip holds the examples/ folder itself
+        elif (d / "examples").is_dir():
+            shutil.copytree(d / "examples", out_dir / "examples", dirs_exist_ok=True)
+        else:
+            continue
+        found = True
+    if found:
+        zip_examples(out_dir)
 
 
 async def run(cfg: Config, out_dir: Path, judge_filter: list[str] | None = None,
@@ -83,9 +114,6 @@ async def run(cfg: Config, out_dir: Path, judge_filter: list[str] | None = None,
         current_bias.set(bias_name)  # gather runs each in its own task, so this tags only this pair's calls
         bias = BIASES[bias_name]
         res = await bias.evaluate(judge, ctx)
-        raw = out_dir / "raw" / slug(judge.label) / f"{bias_name}.jsonl"
-        raw.parent.mkdir(parents=True, exist_ok=True)
-        raw.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in res.records), encoding="utf-8")
         write_examples(out_dir / "examples" / bias_name / slug(judge.label), judge, bias, res.samples)
         log.info("%-28s %-18s %s=%.3f cr=%.3f n=%d invalid=%d", judge.label, bias_name, bias.metric,
                  res.value, res.cr, res.n, res.n_invalid)
@@ -112,6 +140,5 @@ async def run(cfg: Config, out_dir: Path, judge_filter: list[str] | None = None,
 
     summary = pd.DataFrame(rows, columns=SUMMARY_COLUMNS)
     summary.to_csv(out_dir / "summary.csv", index=False)
-    for name in ("raw", "examples"):  # zipped copies for easy download; the folders stay as they are
-        shutil.make_archive(str(out_dir / name), "zip", root_dir=out_dir, base_dir=name)
+    zip_examples(out_dir)
     return summary

@@ -1,5 +1,6 @@
 import asyncio
 import math
+import shutil
 import zipfile
 from pathlib import Path
 
@@ -412,12 +413,13 @@ def test_each_command_writes_a_new_timestamped_folder(tmp_path):
     assert main(["run", *base, "--judge", "b"]) == 0
     first, second = runs()
     for d in (first, second):
+        names = {p.name for p in d.iterdir()}
         assert {"summary.csv", "bias_grid.png", "cost_vs_performance.png", "correctness_grid.png", "utility.png",
-                "utility.csv", "raw", "examples", "raw.zip", "examples.zip"} <= {p.name for p in d.iterdir()}
-        for name in ("raw", "examples"):  # each zip holds exactly the folder's files, byte for byte
-            with zipfile.ZipFile(d / f"{name}.zip") as z:
-                files = {f.relative_to(d).as_posix(): f.read_bytes() for f in (d / name).rglob("*") if f.is_file()}
-                assert files and {n: z.read(n) for n in z.namelist() if not n.endswith("/")} == files
+                "utility.csv", "examples.zip", "config.yaml"} <= names
+        assert not names & {"raw", "raw.zip", "examples"}  # no raw output; examples/ deleted once zipped
+        with zipfile.ZipFile(d / "examples.zip") as z:
+            assert "examples/position/a/correct.md" in z.namelist() or "examples/position/b/correct.md" in z.namelist()
+        assert load_config(d / "config.yaml") == load_config(path)  # the run's config, kept with its results
         assert not (d / "cache").exists()  # per-run cache is deleted when the run finishes
     assert not (tmp_path / "results" / "cache").exists()  # nothing shared across runs
 
@@ -430,6 +432,34 @@ def test_each_command_writes_a_new_timestamped_folder(tmp_path):
     for d in runs():  # every folder carries a copy of the log of the command that wrote it
         (log,) = d.glob("*.log")
         assert str(d) in log.read_text(encoding="utf-8")
+
+
+def test_split_parts_merge_into_one_complete_folder(tmp_path):
+    import yaml
+    from judgebias.__main__ import main
+    cfg = {"dataset_dir": str(DATASET), "env_file": None, "results_dir": str(tmp_path / "results"),
+           "samples_per_bias": 3, "providers": {"fake": {"protocol": "fake"}},
+           "judges": [{"label": "a", "provider": "fake", "model": "m1", "effort": ["low", "high"]}]}
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+    base = ["--config", str(path), "--log-dir", str(tmp_path / "logs")]
+    split = tmp_path / "results" / "split"
+
+    assert main(["run", *base, "--bias", "position", "--bias", "cot", "--out-dir", str(split / "part1")]) == 0
+    assert main(["run", *base, "--bias", "self_enhancement", "--out-dir", str(split / "part2")]) == 0
+    with pytest.raises(FileExistsError):  # a part folder is never overwritten
+        main(["run", *base, "--bias", "cot", "--out-dir", str(split / "part1")])
+    with pytest.raises(FileNotFoundError):
+        main(["plot", *base, "--run", str(split / "part1"), "--run", str(split / "part3"), "--out-dir", str(tmp_path / "x")])
+
+    parts = [x for p in ("part1", "part2", "part3") for x in ("--run", str(split / p))]
+    assert main(["plot", *base, *parts, "--allow-missing", "--out-dir", str(split / "merged")]) == 0
+    merged = split / "merged"
+    assert sorted(set(pd.read_csv(merged / "summary.csv")["bias"])) == ["cot", "position", "self_enhancement"]
+    assert not any((merged / n).exists() for n in ("raw", "raw.zip", "examples"))
+    with zipfile.ZipFile(merged / "examples.zip") as z:
+        assert {n.split("/")[1] for n in z.namelist() if n.count("/") > 1} == {"position", "cot", "self_enhancement"}
+        assert "examples/self_enhancement/a_high/correct.md" in z.namelist()
 
 
 def test_empty_dataset_folder_gives_submodule_hint(tmp_path):
@@ -572,3 +602,95 @@ def test_robustness_rate_expects_a_change_for_fallacy_oversight():
     assert robustness_rate(pairs) == 1 / 5
     assert robustness_rate(pairs, expect_change=True) == 2 / 5
     assert BIASES["fallacy_oversight"].expect_change and not BIASES["position"].expect_change
+
+
+def test_run_codes_name_runs_and_get_zips_only_the_result_files(tmp_path, capsys):
+    import yaml
+    from judgebias import registry
+    from judgebias.__main__ import main
+    cfg = {"dataset_dir": str(DATASET), "env_file": None, "results_dir": str(tmp_path / "results"),
+           "samples_per_bias": 3, "biases": ["position"], "providers": {"fake": {"protocol": "fake"}},
+           "judges": [{"label": "a", "provider": "fake", "model": "m1"}, {"label": "b", "provider": "fake", "model": "m2"}]}
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+    base = ["--config", str(path), "--log-dir", str(tmp_path / "logs")]
+    results = tmp_path / "results"
+    code_of = lambda out: next(l.split()[-1] for l in out.splitlines() if l.startswith("Run code:"))
+
+    assert main(["run", *base, "--judge", "a"]) == 0
+    code_a = code_of(capsys.readouterr().out)
+    assert main(["run", *base, "--judge", "b"]) == 0
+    code_b = code_of(capsys.readouterr().out)
+    assert len(code_a) == 4 and code_a != code_b
+    assert main(["plot", *base, "--run", code_a, "--run", code_b]) == 0  # codes work as --run
+    code_m = code_of(capsys.readouterr().out)
+    assert main(["run", *base, "--out-dir", str(tmp_path / "p"), "--part-of", "zzzz"]) == 0  # a part: no own code
+    assert "Run code:" not in capsys.readouterr().out
+    assert [r["code"] for r in registry.load(results)] == [code_a, code_b, code_m]
+
+    assert main(["get", code_m.upper(), *base]) == 0
+    with zipfile.ZipFile(results / "exports" / f"{code_m}.zip") as z:
+        names = set(z.namelist())
+    assert {f"{code_m}/summary.csv", f"{code_m}/bias_grid.png", f"{code_m}/examples.zip", f"{code_m}/config.yaml"} <= names
+    assert not any(n.count("/") > 1 for n in names)  # top-level files only
+
+    # a split job: its code points at merged/, which is missing until the merge job ran
+    split = results / "split_x"
+    code_s = registry.register(results, split, "split", "model=m1")
+    (split / "part1").mkdir(parents=True)
+    with pytest.raises(FileNotFoundError, match="not merged yet; parts finished: part1=no"):
+        main(["get", code_s, *base])
+    assert main(["runs", *base]) == 0
+    listed = capsys.readouterr().out
+    assert f"{code_s}" in listed and "pending" in listed and f"{code_a}" in listed
+    shutil.copytree(results / registry.lookup(results, code_m)["folder"], split / "merged")
+    assert main(["get", code_s, *base]) == 0
+    with pytest.raises(FileNotFoundError, match="No run with code"):
+        main(["get", "nope", *base])
+
+
+def test_config_snapshot_is_frozen_and_works_from_any_folder(tmp_path, capsys):
+    import yaml
+    from judgebias import registry
+    from judgebias.__main__ import main
+    from judgebias.config import config_origin, snapshot_config
+    cfg = {"dataset_dir": str(DATASET), "env_file": None, "results_dir": "results", "samples_per_bias": 3,
+           "biases": ["position"], "providers": {"fake": {"protocol": "fake"}},
+           "judges": [{"label": "a", "provider": "fake", "model": "m1", "effort": ["low", "high"]}]}
+    orig = tmp_path / "config.yaml"
+    orig.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+    snap = snapshot_config(orig, tmp_path / "elsewhere" / "deeper" / "snap.yaml")
+    assert load_config(snap) == load_config(orig)  # relative results_dir still means <orig folder>/results
+    assert config_origin(snapshot_config(snap, tmp_path / "snap2.yaml")) == str(orig.resolve())  # copy of a copy
+
+    orig.write_text(yaml.safe_dump({**cfg, "samples_per_bias": 99}), encoding="utf-8")  # edited after "submission"
+    assert main(["run", "--config", str(snap), "--log-dir", str(tmp_path / "logs")]) == 0
+    (entry,) = registry.load(tmp_path / "results")
+    out = registry.result_dir(tmp_path / "results", entry)
+    assert yaml.safe_load((out / "config.yaml").read_text(encoding="utf-8"))["samples_per_bias"] == 3
+    assert entry["note"].startswith("config=config.yaml ")  # named after the original, not the snapshot file
+    with pytest.raises(ConfigError):
+        bad = tmp_path / "bad.yaml"
+        bad.write_text("judges: 5\n", encoding="utf-8")
+        snapshot_config(bad, tmp_path / "never.yaml")
+    assert not (tmp_path / "never.yaml").exists()
+
+
+def test_snapshot_into_a_new_run_folder_is_the_config_kept_with_the_result(tmp_path, capsys):
+    """job.sh / vllm_job.sh: snapshot at submission into results/<timestamp>/config.yaml, then run --out-dir there."""
+    import yaml
+    from judgebias.__main__ import main
+    cfg = {"dataset_dir": str(DATASET), "env_file": None, "results_dir": "results", "samples_per_bias": 3,
+           "biases": ["position"], "providers": {"fake": {"protocol": "fake"}},
+           "judges": [{"label": "a", "provider": "fake", "model": "m1"}]}
+    orig = tmp_path / "config.yaml"
+    orig.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+    assert main(["snapshot", "--config", str(orig)]) == 0
+    snap = Path(capsys.readouterr().out.strip())
+    assert snap.name == "config.yaml" and snap.parent.parent == tmp_path / "results"
+    orig.write_text(yaml.safe_dump({**cfg, "samples_per_bias": 99}), encoding="utf-8")  # edited while queued
+    assert main(["run", "--config", str(snap), "--out-dir", str(snap.parent), "--log-dir", str(tmp_path / "logs")]) == 0
+    assert yaml.safe_load(snap.read_text(encoding="utf-8"))["samples_per_bias"] == 3  # left as it was
+    assert (snap.parent / "summary.csv").exists()
+    with pytest.raises(FileExistsError):  # a finished folder is never reused
+        main(["snapshot", "--config", str(orig), "--out-dir", str(snap.parent)])

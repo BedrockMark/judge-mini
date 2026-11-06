@@ -19,7 +19,7 @@ class BiasResult:
     n_invalid: int = 0
     cr: float = math.nan  # consistency rate of the unperturbed prompt (robustness biases only)
     extra: dict = field(default_factory=dict)
-    records: list[dict] = field(default_factory=list)  # per-item details for results/raw
+    records: list[dict] = field(default_factory=list)  # per-item details the metrics are computed from
     samples: list[dict] = field(default_factory=list)  # per-call examples for results/examples, see sample()
 
 

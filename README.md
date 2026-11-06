@@ -118,14 +118,24 @@ Every command also writes all log records (INFO and above, including warnings, e
 `results/<YYYYmmdd_HHMMSS>/` folder when they finish (or fail).
 
 Every `run` and `plot` writes to a new `results/<YYYYmmdd_HHMMSS>/` folder, so earlier outputs are never overwritten:
-`summary.csv`, the figures (see below), per-item `raw/<judge>/<bias>.jsonl` and `examples/` plus zipped copies
-`raw.zip` and `examples.zip` (run), or the merged `summary.csv`,
-the figures and `sources.txt` (plot; with several `--run`, a later run wins on the same judge × bias).
+`summary.csv`, the figures (see below), `examples.zip` (the `examples/` folder is deleted once zipped; no per-item
+raw output is kept) and `config.yaml`, a snapshot of the exact config used (paths made absolute; its first line names
+the original file) (run), or the merged `summary.csv`, the figures, `examples.zip`, `config.yaml` and `sources.txt`
+(plot; with several `--run`, a later run wins on the same judge × bias, and their `examples.zip` are merged too).
+`--out-dir <folder>` (new, empty, or holding only its `config.yaml` snapshot) replaces the timestamped folder;
+`plot --allow-missing` skips `--run` folders without a `summary.csv`. `python -m judgebias snapshot --config X`
+creates a new run folder holding just that snapshot and prints its path; `job.sh` / `vllm_job.sh` use it at
+submission, then run with `--out-dir` that folder, so the config a queued job reads is the one kept with its results.
+
+Each `run` / `plot` (and each `vllm_split.sh` job) gets a 4-character run code, printed as `Run code: k7m2` and
+recorded in `<results_dir>/runs.tsv`. `python -m judgebias runs` lists the codes (done / pending);
+`python -m judgebias get <code>` zips only that run's result files (summary, figures, `examples.zip`, `config.yaml`,
+logs) into `<results_dir>/exports/<code>.zip` for download; `plot --run <code>` also accepts a code.
 Nothing is reused between runs: every `run` calls the APIs afresh. Within one run, responses are cached by
 (provider, model, effort, params, prompt, repeat) in `results/<YYYYmmdd_HHMMSS>/cache/` so identical calls are made
 once; that cache is deleted when the run finishes (or fails).
 
-`examples/<bias>/<judge>/{correct,wrong,invalid}.md` hold up to 5 example calls each (input prompt, desired
+`examples.zip` holds `examples/<bias>/<judge>/{correct,wrong,invalid}.md`: up to 5 example calls each (input prompt, desired
 output, actual output), under a table with that judge's correct/wrong/invalid counts for the bias:
 
 | Bias | Sample | Correct when |

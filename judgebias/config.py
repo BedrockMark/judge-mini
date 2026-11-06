@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
 
@@ -111,6 +112,34 @@ def load_config(path: str | Path) -> Config:
     if cfg.log_dir is None:
         cfg.log_dir = cfg.results_dir / "logs"
     return cfg
+
+
+SNAPSHOT_HEADER = "# judgebias config snapshot of "
+PATH_FIELDS = ("dataset_dir", "env_file", "results_dir", "log_dir")
+
+
+def snapshot_config(src: str | Path, dest: str | Path) -> Path:
+    """Copy a config as it is now, for a job that reads it later: editing the original then can't change a queued
+    job, so several differently configured jobs can be submitted one after another. Relative paths are made
+    absolute (they are relative to the config's own folder), so the copy works wherever it is stored."""
+    src, dest = Path(src), Path(dest)
+    cfg = load_config(src)  # also validates, so a broken config fails at submission
+    raw = yaml.safe_load(src.read_text(encoding="utf-8"))
+    for field in PATH_FIELDS:
+        value = getattr(cfg, field)
+        raw[field] = None if value is None else str(value)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(f"{SNAPSHOT_HEADER}{config_origin(src)} ({datetime.now():%Y-%m-%d %H:%M:%S})\n"
+                    "# Paths made absolute. Jobs submitted with this copy read it, not the original.\n"
+                    + yaml.safe_dump(raw, sort_keys=False, allow_unicode=True), encoding="utf-8")
+    return dest
+
+
+def config_origin(path: str | Path) -> str:
+    """The original config a snapshot was taken from (the path itself if it is not a snapshot)."""
+    path = Path(path)
+    first = path.read_text(encoding="utf-8").split("\n", 1)[0]
+    return first[len(SNAPSHOT_HEADER):].rsplit(" (", 1)[0] if first.startswith(SNAPSHOT_HEADER) else str(path.resolve())
 
 
 def require_dataset(cfg: Config) -> None:
