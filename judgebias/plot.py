@@ -1,5 +1,6 @@
 """summary.csv -> figures: the 3x4 grid of bias panels (one bar per judge) mirroring the paper's figure, plus
-cost (mean output tokens per call) vs. metric / Correctness per bias, and the overall utility plot + table."""
+cost (mean output tokens per call) vs. metric / Correctness per bias, and the overall utility plot + table. Runs
+whose judges were served by our vLLM job also get the two per-bias cost grids with FLOPs per call as the cost."""
 from __future__ import annotations
 
 import logging
@@ -26,7 +27,7 @@ PALETTE = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#6
 REF_COLOR = "#d62728"
 INK, MUTED, GRID = "#1f1f1d", "#6b6a63", "#e1e0d9"
 Y_LABEL = {"robustness": "Robustness Rate", "accuracy": "Accuracy", "error_rate": "Error Rate (lower is better)"}
-X_LABEL = "Mean output tokens / call"
+X_LABEL = {"out_tokens": "Mean output tokens / call", "flops": "Mean FLOPs / call (vLLM)"}
 # Effort order within a judge group (one config entry with an effort list); unknown values go last, in config order.
 EFFORT_ORDER = [None, "none", "minimal", "low", "medium", "high", "xhigh", "max"]
 EFFORT_MARKER = {None: "o", "none": "o", "minimal": "v", "low": "s", "medium": "^", "high": "D", "xhigh": "P",
@@ -142,7 +143,10 @@ def _with_cost_columns(summary: pd.DataFrame) -> pd.DataFrame:
 
 
 def _tick_label(v: float, _=None) -> str:
-    return f"{v / 1000:g}k" if v >= 1000 else f"{v:g}"
+    for scale, suffix in ((1e15, "P"), (1e12, "T"), (1e9, "G"), (1e6, "M"), (1e3, "k")):
+        if v >= scale:
+            return f"{v / scale:g}{suffix}"
+    return f"{v:g}"
 
 
 def _log_x(ax, xs: list[float]) -> None:
@@ -175,15 +179,15 @@ def _cost_scatter(ax, judges, colors, points: dict[str, tuple[float, float]]) ->
     ax.grid(axis="x", color=GRID, linewidth=0.6, zorder=0)
 
 
-def _points(df: pd.DataFrame, ycol: str) -> dict[str, tuple[float, float]]:
-    """{judge: (out_tokens, ycol)} for rows where both are known; df is indexed by judge."""
-    x, y = pd.to_numeric(df["out_tokens"], errors="coerce"), pd.to_numeric(df[ycol], errors="coerce")
+def _points(df: pd.DataFrame, ycol: str, xcol: str = "out_tokens") -> dict[str, tuple[float, float]]:
+    """{judge: (xcol, ycol)} for rows where both are known; df is indexed by judge."""
+    x, y = pd.to_numeric(df[xcol], errors="coerce"), pd.to_numeric(df[ycol], errors="coerce")
     ok = x.notna() & y.notna() & (x > 0)
     return {label: (float(x[label]), float(y[label])) for label in df.index[ok]}
 
 
-def _no_data(ax) -> None:
-    ax.text(0.5, 0.5, "no token data", transform=ax.transAxes, ha="center", va="center", fontsize=9, color=MUTED)
+def _no_data(ax, what: str = "token") -> None:
+    ax.text(0.5, 0.5, f"no {what} data", transform=ax.transAxes, ha="center", va="center", fontsize=9, color=MUTED)
     ax.set_xticks([])
     ax.set_yticks([])
 
@@ -197,17 +201,18 @@ def _cost_handles(judges, colors) -> list:
     return handles
 
 
-def _plot_cost_grid(cfg: Config, summary: pd.DataFrame, out: Path, ycol: str, ncols: int) -> Path:
+def _plot_cost_grid(cfg: Config, summary: pd.DataFrame, out: Path, ycol: str, ncols: int,
+                    xcol: str = "out_tokens") -> Path:
     summary = _with_cost_columns(summary)
     judges, colors = _judges_and_colors(cfg, summary)
     fig, panels = _panel_grid(summary, ncols)
     for ax, name in panels:
         bias = BIASES[name]
-        points = _points(summary[summary["bias"] == name].set_index("judge"), ycol)
+        points = _points(summary[summary["bias"] == name].set_index("judge"), ycol, xcol)
         _style(ax, bias.title, Y_LABEL[bias.metric] if ycol == "value" else "Correctness")
-        ax.set_xlabel(X_LABEL, fontsize=8, color=MUTED)
+        ax.set_xlabel(X_LABEL[xcol], fontsize=8, color=MUTED)
         if not points:
-            _no_data(ax)
+            _no_data(ax, "token" if xcol == "out_tokens" else "FLOP")
             continue
         _cost_scatter(ax, judges, colors, points)
         _log_x(ax, [x for x, _ in points.values()])
@@ -215,14 +220,15 @@ def _plot_cost_grid(cfg: Config, summary: pd.DataFrame, out: Path, ycol: str, nc
     return _finish(fig, _cost_handles(judges, colors), out)
 
 
-def plot_cost_performance(cfg: Config, summary: pd.DataFrame, out: Path, ncols: int = 4) -> Path:
-    """Per bias: mean output tokens per call (x) vs. the panel's own metric (y)."""
-    return _plot_cost_grid(cfg, summary, out, "value", ncols)
+def plot_cost_performance(cfg: Config, summary: pd.DataFrame, out: Path, ncols: int = 4,
+                          xcol: str = "out_tokens") -> Path:
+    """Per bias: mean output tokens (or FLOPs, xcol="flops") per call (x) vs. the panel's own metric (y)."""
+    return _plot_cost_grid(cfg, summary, out, "value", ncols, xcol)
 
 
-def plot_correctness(cfg: Config, summary: pd.DataFrame, out: Path, ncols: int = 4) -> Path:
-    """Per bias: mean output tokens per call (x) vs. Correctness, the share of samples judged correct (y)."""
-    return _plot_cost_grid(cfg, summary, out, "correctness", ncols)
+def plot_correctness(cfg: Config, summary: pd.DataFrame, out: Path, ncols: int = 4, xcol: str = "out_tokens") -> Path:
+    """Per bias: mean output tokens (or FLOPs) per call (x) vs. Correctness, the share of samples judged correct (y)."""
+    return _plot_cost_grid(cfg, summary, out, "correctness", ncols, xcol)
 
 
 def utility_table(cfg: Config, summary: pd.DataFrame) -> pd.DataFrame:
@@ -250,7 +256,7 @@ def plot_utility(cfg: Config, summary: pd.DataFrame, out: Path, table: pd.DataFr
     judges, colors = _judges_and_colors(cfg, summary)
     fig, ax = plt.subplots(figsize=(7, 5.2))
     _style(ax, "Mean utility: Correctness vs. cost, all biases", "Mean Correctness across biases")
-    ax.set_xlabel(X_LABEL, fontsize=9, color=MUTED)
+    ax.set_xlabel(X_LABEL["out_tokens"], fontsize=9, color=MUTED)
     points = _points(t.rename(columns={"mean_correctness": "y"}), "y")
     skipped = sorted(set(t.index) - set(points))
     if skipped:
@@ -269,10 +275,15 @@ def plot_utility(cfg: Config, summary: pd.DataFrame, out: Path, table: pd.DataFr
 
 
 def plot_all(cfg: Config, summary: pd.DataFrame, out_dir: Path) -> list[Path]:
-    """Every figure for one results folder, plus utility.csv (the numbers behind utility.png)."""
+    """Every figure for one results folder, plus utility.csv (the numbers behind utility.png). The FLOP versions of
+    the two cost grids only when some judge has FLOPs (served by our vLLM job)."""
     table = utility_table(cfg, summary)
     table.to_csv(out_dir / "utility.csv", index=False)
-    return [plot_summary(cfg, summary, out_dir / "bias_grid.png"),
+    outs = [plot_summary(cfg, summary, out_dir / "bias_grid.png"),
             plot_cost_performance(cfg, summary, out_dir / "cost_vs_performance.png"),
             plot_correctness(cfg, summary, out_dir / "correctness_grid.png"),
             plot_utility(cfg, summary, out_dir / "utility.png", table)]
+    if "flops" in summary.columns and pd.to_numeric(summary["flops"], errors="coerce").gt(0).any():
+        outs += [plot_cost_performance(cfg, summary, out_dir / "cost_vs_performance_flops.png", xcol="flops"),
+                 plot_correctness(cfg, summary, out_dir / "correctness_grid_flops.png", xcol="flops")]
+    return outs

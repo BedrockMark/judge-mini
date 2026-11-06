@@ -694,3 +694,79 @@ def test_snapshot_into_a_new_run_folder_is_the_config_kept_with_the_result(tmp_p
     assert (snap.parent / "summary.csv").exists()
     with pytest.raises(FileExistsError):  # a finished folder is never reused
         main(["snapshot", "--config", str(orig), "--out-dir", str(snap.parent)])
+
+
+# --- FLOPs (vLLM jobs) ---------------------------------------------------------------------------
+
+TINY_MOE = {"hidden_size": 8, "num_hidden_layers": 4, "num_attention_heads": 4, "num_key_value_heads": 2,
+            "head_dim": 2, "intermediate_size": 6, "num_local_experts": 4, "num_experts_per_tok": 2,
+            "vocab_size": 50, "sliding_window": 5,
+            "layer_types": ["sliding_attention", "full_attention", "sliding_attention", "full_attention"]}
+
+
+def test_call_flops_matches_vllm_step_by_step_accounting():
+    from judgebias.flops import FlopModel
+    m = FlopModel.from_config(TINY_MOE)
+    D, q, kv, d, L, V = 8, 4, 2, 2, 4, 50
+    per_token = L * (2 * D * (q + 2 * kv) * d + 2 * D * q * d + 2 * D * 3 * 6 * 2)
+
+    def step(num_tokens, context):  # perf.py: one request's share of one step
+        tc = sum(num_tokens * (min(context, 5) if i % 2 == 0 else context) for i in range(L))
+        return num_tokens * per_token + 4 * q * d * tc + 2 * D * V
+
+    for p, o in [(3, 1), (3, 9), (12, 4)]:
+        expected = step(p, p) + sum(step(1, k) for k in range(p + 1, p + o))  # prefill, then o - 1 decode steps
+        assert m.call_flops(p, o) == pytest.approx(expected)
+    dense = FlopModel.from_config({**TINY_MOE, "num_local_experts": 0, "layer_types": None})
+    assert dense.windows == [None] * 4 and dense.ffn_per_token == 2 * D * 3 * 6 * L
+
+
+def test_flop_counter_summed_over_engines_ignoring_created():
+    from judgebias.flops import parse_counter
+    text = ("# TYPE vllm:estimated_flops_per_gpu_total counter\n"
+            'vllm:estimated_flops_per_gpu_total{engine="0",model_name="m"} 1.5e+12\n'
+            'vllm:estimated_flops_per_gpu_total{engine="1",model_name="m"} 5e+11\n'
+            'vllm:estimated_flops_per_gpu_created{engine="0",model_name="m"} 1.7e+09\n')
+    assert parse_counter(text) == 2e12
+    assert parse_counter("vllm:num_requests_running 3\n") is None
+
+
+def test_flops_scaled_to_vllm_counter_and_flop_plots_drawn(tmp_path, monkeypatch):
+    import json
+    from judgebias import runner
+    from judgebias.plot import plot_all
+    (tmp_path / "model").mkdir()
+    (tmp_path / "model" / "config.json").write_text(json.dumps(TINY_MOE), encoding="utf-8")
+    monkeypatch.setenv("VLLM_MODEL_DIR", str(tmp_path / "model"))
+    monkeypatch.setenv("VLLM_TP", "2")
+    readings = iter([1e9, 1e9 + 4e12])  # counter at run start / end
+
+    async def fake_counter(urls, key, gpus):
+        assert gpus == 2
+        return next(readings)
+
+    monkeypatch.setattr(runner, "measured_flops", fake_counter)
+    cfg = make_cfg(tmp_path, biases=["position", "cot"],
+                   providers={"vllm": {"protocol": "fake", "flops": True}, "fake": {"protocol": "fake"}},
+                   judges=[{"label": "G", "provider": "vllm", "model": "m", "effort": ["low", "high"]},
+                           {"label": "api", "provider": "fake", "model": "m2"}])
+    out = tmp_path / "out"
+    out.mkdir()
+    s = asyncio.run(runner.run(cfg, out)).set_index(["judge", "bias"])
+    vllm_rows = s.loc[["G (low)", "G (high)"]]
+    assert (vllm_rows["flops"] > 0).all() and vllm_rows["flops_scale"].nunique() == 1
+    assert s.loc[("G (high)", "cot"), "flops"] > s.loc[("G (low)", "cot"), "flops"]
+    assert s.loc["api"]["flops"].isna().all() and s.loc["api"]["flops_scale"].isna().all()
+    names = {p.name for p in plot_all(cfg, s.reset_index(), out)}
+    assert {"cost_vs_performance_flops.png", "correctness_grid_flops.png"} <= names
+
+
+def test_no_flop_plots_without_flop_data(tmp_path):
+    from judgebias.runner import run
+    from judgebias.plot import plot_all
+    cfg = make_cfg(tmp_path, biases=["cot"])
+    out = tmp_path / "out"
+    out.mkdir()
+    s = asyncio.run(run(cfg, out))
+    assert s["flops"].isna().all()
+    assert not any("flops" in p.name for p in plot_all(cfg, s, out))

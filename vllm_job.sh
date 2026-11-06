@@ -26,6 +26,7 @@
 # test while this one is still queued. The snapshot is the run's results/<timestamp>/config.yaml (folder created at
 # submission, or the --out-dir given) and is kept there with the results.
 # Logs: job_log/<jobid>.out (client, last line result=PASS/FAIL), job_log/<jobid>_vllm<i>.log (replica i).
+# vLLM runs with --enable-mfu-metrics, so the results also get FLOPs per call and the FLOP cost plots.
 
 set -uo pipefail
 
@@ -158,6 +159,7 @@ start_replica() {  # start_replica <i>: vLLM on GPUs [i*TP, (i+1)*TP) of this jo
         --tensor-parallel-size "$TP" \
         --max-model-len "${MAX_MODEL_LEN:-32768}" \
         --max-num-seqs "${MAX_NUM_SEQS:-256}" \
+        --enable-mfu-metrics \
         ${VLLM_EXTRA_ARGS:-} > "${LOG_PREFIX}_vllm$i.log" 2>&1 &
     PIDS[i]=$! URLS[i]=http://127.0.0.1:$port
 }
@@ -195,6 +197,9 @@ judgebias() {  # python -m judgebias "$@", aborted if any replica dies meanwhile
 
 source .venv/bin/activate
 export VLLM_BASE_URL=$(IFS=,; echo "${URLS[*]/%//v1}")   # read by config.vllm.yaml; client balances over all
+# A `flops: true` provider estimates each call's FLOPs from this config.json and scales them to the servers'
+# --enable-mfu-metrics counter (per GPU, x TP GPUs per replica).
+export VLLM_MODEL_DIR=$PWD/$MODEL_DIR VLLM_TP=$TP
 judgebias check --config "$CONFIG" --model "$MODEL_ID" || finish 1
 judgebias run --config "$CONFIG" --model "$MODEL_ID" "$@"
 finish $?

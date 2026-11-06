@@ -9,6 +9,7 @@ from types import ModuleType
 
 from .config import Config, JudgeSpec
 from .data import load_dataset
+from .flops import FlopModel
 from .llm import ChatClient, PriorityGate, RateLimiter, ResponseCache, cache_key
 from .prompts import load_templates
 
@@ -27,10 +28,16 @@ class Usage:
     calls: int = 0  # successful asks
     known: int = 0  # ... of which the output token count is known (older cache entries lack it)
     output_tokens: int = 0
+    flops_known: int = 0  # ... of which the FLOPs are estimated (a `flops` provider, prompt + output tokens known)
+    flops: float = 0.0  # estimate before the runner scales it to vLLM's measured total
 
     @property
     def mean_output_tokens(self) -> float:
         return self.output_tokens / self.known if self.known else float("nan")
+
+    @property
+    def mean_flops(self) -> float:
+        return self.flops / self.flops_known if self.flops_known else float("nan")
 
 
 @dataclass
@@ -40,6 +47,8 @@ class Context:
     cache: ResponseCache
     stats: dict[str, int] = field(default_factory=lambda: {"api_calls": 0, "cache_hits": 0, "errors": 0, "rate_limited": 0})
     usage: dict[tuple[str, str | None], Usage] = field(default_factory=dict)  # (judge label, bias) -> tokens
+    flop_models: dict[str, FlopModel] = field(default_factory=dict)  # provider -> estimator (`flops` providers)
+    flops_spent: dict[str, float] = field(default_factory=dict)  # provider -> estimated FLOPs of calls actually made
 
     def __post_init__(self) -> None:
         self._gates: dict[tuple[str, str], PriorityGate] = {}  # one per (provider, model): each is its own server
@@ -82,6 +91,17 @@ class Context:
         if tokens is not None:
             u.known += 1
             u.output_tokens += tokens
+        flops = self._estimate_flops(judge, key)
+        if flops is not None:
+            u.flops_known += 1
+            u.flops += flops
+
+    def _estimate_flops(self, judge: JudgeSpec, key: str) -> float | None:
+        model = self.flop_models.get(judge.provider)
+        prompt, output = self.cache.prompt_tokens(key), self.cache.output_tokens(key)
+        if model is None or prompt is None or output is None:
+            return None
+        return model.call_flops(prompt, output)
 
     async def _call(self, key: str, judge: JudgeSpec, prompt: str, run_idx: int) -> str | None:
         client = self.clients[judge.provider]
@@ -104,7 +124,10 @@ class Context:
                     self.stats["api_calls"] += 1
                     self.cache.put(key, text, {"judge": judge.label, "model": judge.model,
                                                "effort": judge.effort, "run_idx": run_idx},
-                                   getattr(text, "output_tokens", None))
+                                   getattr(text, "output_tokens", None), getattr(text, "prompt_tokens", None))
+                    flops = self._estimate_flops(judge, key)
+                    if flops is not None:
+                        self.flops_spent[judge.provider] = self.flops_spent.get(judge.provider, 0.0) + flops
                     return str(text)
                 except Exception as e:  # SDKs already retry transient errors; this covers the rest
                     if getattr(e, "status_code", None) == 429 and throttled < 20:

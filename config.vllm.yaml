@@ -15,7 +15,9 @@ providers:
   # concurrency is per replica, 1.5x vLLM's --max-num-seqs (vllm_job.sh MAX_NUM_SEQS=256) so a short queue
   # inside vLLM refills every freed batch slot at once. The long timeout covers that queueing plus slow
   # 16k-token generations in a full batch; a timeout would resend the request and redo the work.
-  vllm: {protocol: openai, base_url_env: VLLM_BASE_URL, api_key_env: VLLM_API_KEY, concurrency: 384, timeout: 14400}
+  # flops: also record FLOPs per call (vLLM's --enable-mfu-metrics counter, see judgebias/flops.py) -> FLOP cost plots.
+  vllm: {protocol: openai, base_url_env: VLLM_BASE_URL, api_key_env: VLLM_API_KEY, concurrency: 384, timeout: 14400,
+         flops: true}
 
 judges:
   # Labels match config.yaml, so API and vLLM runs can be merged with `plot --run`.

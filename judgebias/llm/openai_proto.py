@@ -20,6 +20,7 @@ class OpenAIProtocolClient(ChatClient):
         self._clients = [AsyncOpenAI(api_key=api_key, base_url=u, max_retries=4, timeout=timeout) for u in urls]
         self._inflight = [0] * len(self._clients)
         self._token_param = token_param
+        self.base_urls = [u for u in urls if u]
 
     @property
     def replicas(self) -> int:
@@ -39,4 +40,5 @@ class OpenAIProtocolClient(ChatClient):
         finally:
             self._inflight[i] -= 1
         tokens = resp.usage.completion_tokens if resp.usage else None  # includes reasoning tokens
-        return Completion(resp.choices[0].message.content or "", tokens)
+        prompt = resp.usage.prompt_tokens if resp.usage else None
+        return Completion(resp.choices[0].message.content or "", tokens, prompt)

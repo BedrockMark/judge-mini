@@ -24,6 +24,9 @@ class ProviderSpec(BaseModel):
     rpm: int | None = None  # client-side cap on requests per 60 s, shared by every judge on this provider (key)
     concurrency: int | None = None  # per-model in-flight cap per replica (base URL); default: global concurrency
     timeout: float = 600  # seconds per request (openai protocol), incl. time queued inside the server
+    # A vllm_job.sh server: also record FLOPs per call (judgebias/flops.py), from $VLLM_MODEL_DIR/config.json and the
+    # server's /metrics FLOP counter ($VLLM_TP GPUs per replica); vllm_job.sh sets both variables.
+    flops: bool = False
 
 
 class JudgeSpec(BaseModel):

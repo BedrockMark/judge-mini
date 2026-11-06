@@ -17,9 +17,10 @@ class FakeClient(ChatClient):
         seed = hashlib.sha256(f"{model}|{effort}|{prompt}".encode()).digest()
         rng = random.Random(seed)
         tokens = int(EFFORT_TOKENS.get(effort, 600) * rng.uniform(0.5, 1.5))
+        prompt_tokens = len(prompt) // 4  # rough chars-per-token
         if "[[Rating]]" in prompt:
-            return Completion(f"Fake explanation. Rating: [[{rng.randint(5, 9)}]]", tokens)
+            return Completion(f"Fake explanation. Rating: [[{rng.randint(5, 9)}]]", tokens, prompt_tokens)
         if '"[[A]]"' in prompt:
             # Mostly prefer A to mimic a judge with some position preference.
-            return Completion(f"Fake explanation. [[{'A' if rng.random() < 0.7 else 'B'}]]", tokens)
-        return Completion(f"Fake answer {rng.randint(0, 10**6)}.", tokens)
+            return Completion(f"Fake explanation. [[{'A' if rng.random() < 0.7 else 'B'}]]", tokens, prompt_tokens)
+        return Completion(f"Fake answer {rng.randint(0, 10**6)}.", tokens, prompt_tokens)

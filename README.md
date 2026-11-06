@@ -155,6 +155,7 @@ Invalid = a verdict/score needed for the comparison could not be parsed (or the 
 | `cost_vs_performance.png` | per bias: mean output tokens per call (x, log) vs. that bias's metric (y) |
 | `correctness_grid.png` | per bias: mean output tokens per call (x, log) vs. Correctness (y) |
 | `utility.png` + `utility.csv` | per judge: mean output tokens per call over all its calls (x) vs. mean Correctness across biases (y; error bar = std across biases) |
+| `cost_vs_performance_flops.png`, `correctness_grid_flops.png` | the two cost grids with mean FLOPs per call as the cost; only for judges served by `vllm_job.sh` / `vllm_split.sh` |
 
 **Correctness** = `n_correct / samples` over every judged call of that judge × bias (the correct/wrong/invalid rule
 above; invalid counts as not correct; `examples/` only shows a few of them), so every bias is on the same 0–1,
@@ -163,9 +164,20 @@ included), averaged per call. Every call a bias makes counts, cache hits include
 was cached; Self-Enhancement scoring calls are billed to the judge that scored. In the cost plots, the marker shape shows the effort
 and a group's judges are joined by a gray line in effort order (`minimal` < `low` < `medium` < `high` < `xhigh` < `max`).
 
-`summary.csv` carries `group`, `samples`, `n_correct`, `n_wrong` (invalid = the rest), `correctness`, `calls` (calls with a known token count) and `out_tokens` (mean output tokens
-per call). Token counts are stored in the response cache; calls without a reported count are left out of `out_tokens` (a warning is logged), and a judge × bias with no known count is skipped in
+`summary.csv` carries `group`, `samples`, `n_correct`, `n_wrong` (invalid = the rest), `correctness`, `calls` (calls with a known token count), `out_tokens` (mean output tokens
+per call), `flops` and `flops_scale` (below). Token counts are stored in the response cache; calls without a reported count are left out of `out_tokens` (a warning is logged), and a judge × bias with no known count is skipped in
 the cost plots.
+
+**FLOPs (vLLM jobs).** `vllm_job.sh` starts vLLM with `--enable-mfu-metrics`, and `config.vllm.yaml` marks its provider
+`flops: true`. vLLM only reports a server-wide counter (`vllm:estimated_flops_per_gpu_total` on `/metrics`), and all
+judge × bias pairs share the server at once, so each call is estimated with vLLM's own per-step formulas
+(`vllm/v1/metrics/perf.py`: QKV/output projections, attention over the context with sliding windows, top-k MoE
+experts, logits) from the model's `config.json` and the call's prompt / output tokens (`judgebias/flops.py`). The
+estimates are then scaled so that the run's calls add up to the counter's increase over the run (per-GPU value ×
+TP GPUs, summed over replicas): `flops_scale` = measured / estimated, and `flops` = mean scaled FLOPs per call, billed
+like `out_tokens` (cache hits included). The scale also absorbs what the estimate leaves out, e.g. vLLM's prefix-cache
+hits and retried requests. If the counter cannot be read, `flops_scale` is NaN and `flops` is the bare estimate (a
+warning is logged); judges of other providers have NaN `flops` and are left out of the FLOP plots.
 
 ## Extending
 

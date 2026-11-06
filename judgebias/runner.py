@@ -7,6 +7,7 @@ import asyncio
 import json
 import logging
 import math
+import os
 import re
 import shutil
 from collections import Counter
@@ -19,15 +20,18 @@ from .biases import BIASES
 from .config import Config, require_dataset, resolve_keys
 from .context import Context, current_bias
 from .examples import write_examples
+from .flops import FlopModel, measured_flops
 from .llm import ResponseCache, build_clients
 
 log = logging.getLogger(__name__)
 
 # samples = every judged call classified correct/wrong/invalid (examples/ shows only a few of them; n counts dataset
 # rows), correctness = n_correct / samples; out_tokens = mean output tokens (thinking included) per call, over calls
-# whose usage is known (NaN if none, e.g. all answers came from an older cache).
+# whose usage is known (NaN if none, e.g. all answers came from an older cache). flops = mean FLOPs per call (judges on
+# a `flops` provider only, else NaN): the per-call estimate times flops_scale = vLLM's measured FLOPs over the run /
+# the estimates' sum (NaN if the server's counter could not be read; flops is then the bare estimate).
 SUMMARY_COLUMNS = ["judge", "group", "model", "effort", "bias", "metric", "value", "cr", "n", "n_invalid", "samples",
-                   "n_correct", "n_wrong", "correctness", "calls", "out_tokens", "extra"]
+                   "n_correct", "n_wrong", "correctness", "calls", "out_tokens", "flops", "flops_scale", "extra"]
 
 
 def slug(text: str) -> str:
@@ -97,6 +101,21 @@ def merge_details(dirs: list[Path], out_dir: Path) -> None:
         zip_examples(out_dir)
 
 
+def flop_providers(cfg: Config, judges) -> dict[str, tuple[FlopModel, int]]:
+    """{provider: (estimator, GPUs per replica)} for the `flops` providers these judges use; the served model's
+    config.json and the GPU count come from VLLM_MODEL_DIR / VLLM_TP, which vllm_job.sh sets."""
+    out = {}
+    for name in sorted({j.provider for j in judges if cfg.providers[j.provider].flops}):
+        models = sorted({j.model for j in judges if j.provider == name})
+        model_dir, tp = os.environ.get("VLLM_MODEL_DIR"), os.environ.get("VLLM_TP")
+        if len(models) > 1 or not model_dir or not tp:
+            log.warning("Provider '%s': no FLOPs recorded (needs one model per run and VLLM_MODEL_DIR / VLLM_TP, "
+                        "as set by vllm_job.sh; models here: %s)", name, models)
+            continue
+        out[name] = (FlopModel.load(model_dir), int(tp))
+    return out
+
+
 async def run(cfg: Config, out_dir: Path, judge_filter: list[str] | None = None,
               bias_filter: list[str] | None = None) -> pd.DataFrame:
     keys = resolve_keys(cfg)  # fails fast on missing keys, before any call
@@ -108,7 +127,15 @@ async def run(cfg: Config, out_dir: Path, judge_filter: list[str] | None = None,
 
     cache_dir = out_dir / "cache"  # out_dir is new, so this cache starts empty
     cache = ResponseCache(cache_dir / "responses.jsonl")
-    ctx = Context(cfg, build_clients(cfg, keys), cache)
+    clients = build_clients(cfg, keys)
+    flop = flop_providers(cfg, judges)
+    ctx = Context(cfg, clients, cache, flop_models={name: m for name, (m, _) in flop.items()})
+
+    async def flop_counters() -> dict[str, float | None]:
+        return {name: await measured_flops(getattr(clients[name], "base_urls", []), keys[name], gpus)
+                for name, (_, gpus) in flop.items()}
+
+    flops_before = await flop_counters()
 
     async def one(judge, bias_name):
         current_bias.set(bias_name)  # gather runs each in its own task, so this tags only this pair's calls
@@ -130,9 +157,18 @@ async def run(cfg: Config, out_dir: Path, judge_filter: list[str] | None = None,
     finally:
         cache.close()
         shutil.rmtree(cache_dir, ignore_errors=True)
+    scales = {}
+    for name, after in (await flop_counters()).items():
+        before, spent = flops_before[name], ctx.flops_spent.get(name, 0.0)
+        scales[name] = (after - before) / spent if before is not None and after is not None and spent else math.nan
+        log.info("%s: vLLM measured %s FLOPs, per-call estimates sum to %.3g -> scale %.3f", name,
+                 "no" if math.isnan(scales[name]) else f"{after - before:.3g}", spent, scales[name])
+    providers = {j.label: j.provider for j in judges}
     for row in rows:  # after gather: Self-Enhancement bills other judges' scoring calls to their own rows
         u = ctx.usage.get((row["judge"], row["bias"]))
         row["calls"], row["out_tokens"] = (u.known, u.mean_output_tokens) if u else (0, math.nan)
+        row["flops_scale"] = scale = scales.get(providers[row["judge"]], math.nan)
+        row["flops"] = (u.mean_flops if u else math.nan) * (1.0 if math.isnan(scale) else scale)
         if u and u.known < u.calls:
             log.warning("%s / %s: %d of %d calls have no token count (older cache entries); out_tokens uses the rest",
                         row["judge"], row["bias"], u.calls - u.known, u.calls)
