@@ -39,9 +39,10 @@ uv run pytest                                           # tests (no API calls)
   Figures: `bias_grid.png` and `correctness_grid.png` cluster the bars by effort tier, and
   `cost_vs_performance.png` / `cost_vs_correctness.png` (and their `_flops` versions, for judges with FLOPs) overlay
   all judges. Each (folder, group) is one model (named
-  `group [run code]` when two folders share a group; the code comes from the `code` column of `summary.csv`, so an
-  older summary without it can only be compared when no other folder has its groups — otherwise compare stops with
-  an error naming it). Tiers are bottom-aligned: each model's efforts, low to high, fill
+  `group [run code]` when two folders share a group; the code comes from the `code` column of `summary.csv`; an
+  older summary without it gets the code `<results_dir>/runs.tsv` has for its folder, matched by the folder's name or,
+  if it was renamed after download, by the server folder named in the run / plot log copied next to it. If neither
+  matches, compare stops with an error naming the folder). Tiers are bottom-aligned: each model's efforts, low to high, fill
   T1, T2, … and a model with fewer efforts repeats its highest one upward (hatched). E.g. A `off/on` with B
   `low/medium/high` gives T1 = A off, B low; T2 = A on, B medium; T3 = A on (repeated), B high. A model whose
   summary lacks the needed columns (older runs) is left out of that figure.

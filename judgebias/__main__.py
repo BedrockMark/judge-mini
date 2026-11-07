@@ -98,7 +98,7 @@ def main(argv: list[str] | None = None) -> int:
             out_dir = _out_dir(cfg, args)
             (out_dir / "sources.txt").write_text("".join(f"{d}\n" for d in sources), encoding="utf-8")
             logging.info("comparing %s -> %s", [d.name for d in sources], out_dir)
-            for out in compare_all(sources, out_dir):
+            for out in compare_all(sources, out_dir, entries=registry.load(cfg.results_dir)):
                 print(f"Wrote {out}")
             return 0
         if args.cmd == "check":

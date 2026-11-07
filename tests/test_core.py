@@ -818,6 +818,17 @@ def test_compare_names_shared_groups_by_run_code_and_skips_missing_data(tmp_path
     assert set(load_runs([old, _summary_dir(tmp_path / "h", "H", ["low"])])["model"]) == {"G", "H"}  # unique: fine
     with pytest.raises(ValueError, match="old.*no run code"):
         load_runs([a, old])
+    # ... unless runs.tsv knows the folder: by its name, or (renamed after download) by the server folder its log names
+    entries = [{"code": "q7rs", "folder": "old", "kind": "run"},
+               {"code": "w8xy", "folder": "split_20261106_185630_m", "kind": "split"}]
+    assert set(load_runs([a, old], entries)["model"]) == {"G [2e45]", "G [q7rs]"}
+    renamed = _summary_dir(tmp_path / "GPT-n2", "G", ["low"], code=None)
+    (renamed / "plot_20261106_192009.log").write_text(
+        "2026-11-06 19:20:09 INFO    root: plotting ['part1', 'part2'] -> /project/x/results/split_20261106_185630_m/merged\n",
+        encoding="utf-8")
+    assert set(load_runs([a, renamed], entries)["model"]) == {"G [2e45]", "G [w8xy]"}
+    with pytest.raises(ValueError, match="none matched in runs.tsv"):
+        load_runs([a, _summary_dir(tmp_path / "nolog", "G", ["low"], code=None)], entries)
     path = tmp_path / "config.yaml"
     import yaml
     path.write_text(yaml.safe_dump({"dataset_dir": str(DATASET), "env_file": None, "results_dir": str(tmp_path),

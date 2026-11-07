@@ -5,16 +5,18 @@ single wrapping subfolder, or a vllm_split.sh folder's merged/ and/or part<i>/ s
 one winning on the same judge x bias, so a part rerun after the merge counts and a missing merge is not needed).
 
 Each (folder, group) is one model; a group in several folders is told apart by the run code their summary.csv records
-(so older summaries, without one, work only if no other folder has their groups). In the two bar grids, bars are clustered by effort tier: a model's efforts, sorted
+(older summaries without one: the code runs.tsv has for the folder, see registered_code). In the two bar grids, bars are clustered by effort tier: a model's efforts, sorted
 low to high, fill tiers 1, 2, ... from the bottom, and a model with fewer efforts repeats its highest one in the upper
 tiers (hatched bars). E.g. A {none, high} and B {low, medium, high} give tiers [A none, B low], [A high, B medium],
 [A high (repeat), B high]. The cost grids (output tokens, and FLOPs for vLLM-served judges) overlay every model's judges in one scatter per bias."""
 from __future__ import annotations
 
+import io
 import logging
 import math
 import re
 import zipfile
+from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 
@@ -33,6 +35,8 @@ EFFORT_ORDER = [None, "none", "off", "minimal", "low", "medium", "high", "on", "
 COPY_HATCH = "////"
 MAX_DEPTH = 3  # how deep below a source to look for summary.csv
 PART_RE = re.compile(r"part(\d+)")
+# The output folder a copied run / plot log names (the folder's name on the server, before it was downloaded / renamed).
+LOG_FOLDER_RE = re.compile(r"(?:output folder: |plotting .* -> )(.+?)\s*$")
 
 
 def _effort(v) -> str | None:
@@ -49,22 +53,23 @@ def _group(row) -> str:
 
 
 def _listing(src: Path) -> tuple[set[PurePosixPath], callable]:
-    """(every file and folder path below src, relative, up to MAX_DEPTH levels; a reader for one of them)."""
+    """(every file and folder path below src, relative, up to MAX_DEPTH levels; an opener (binary) for one of them)."""
     if src.is_file() and zipfile.is_zipfile(src):
         with zipfile.ZipFile(src) as z:
             names = {PurePosixPath(n.rstrip("/")) for n in z.namelist()}
         names |= {p for n in names for p in n.parents if p != PurePosixPath(".")}  # zips may omit folder entries
 
-        def read(rel):
+        @contextmanager
+        def open_(rel):
             with zipfile.ZipFile(src) as z, z.open(str(rel)) as f:
-                return pd.read_csv(f, dtype={"code": str})  # a code like "2e45" must stay text
+                yield f
     else:
         names = {PurePosixPath(p.relative_to(src).as_posix()) for p in src.rglob("*")
                  if len(p.relative_to(src).parts) <= MAX_DEPTH}
 
-        def read(rel):
-            return pd.read_csv(src / rel, dtype={"code": str})
-    return {n for n in names if len(n.parts) <= MAX_DEPTH}, read
+        def open_(rel):
+            return (src / rel).open("rb")
+    return {n for n in names if len(n.parts) <= MAX_DEPTH}, open_
 
 
 def summary_paths(src: Path) -> list[PurePosixPath]:
@@ -95,16 +100,53 @@ def summary_paths(src: Path) -> list[PurePosixPath]:
 def read_source(src: Path) -> pd.DataFrame:
     """One source's summary (see the module doc), parts merged."""
     paths = summary_paths(src)
-    _, read = _listing(src)
+    _, open_ = _listing(src)
     log.info("%s: reading %s", src, ", ".join(map(str, paths)))
-    df = pd.concat([read(p) for p in paths], ignore_index=True)
+    frames = []
+    for p in paths:
+        with open_(p) as f:
+            frames.append(pd.read_csv(f, dtype={"code": str}))  # a code like "2e45" must stay text
+    df = pd.concat(frames, ignore_index=True)
     return df.drop_duplicates(["judge", "bias"], keep="last").reset_index(drop=True)
 
 
-def load_runs(sources: list[Path]) -> pd.DataFrame:
+def _run_folder_name(path: PurePosixPath) -> str:
+    """The name runs.tsv knows a result folder by: a split's merged/ or part<i>/ go by their split folder's."""
+    parts = [x for x in path.parts if x not in (".", "", "/")]
+    if parts and (parts[-1] == "merged" or PART_RE.fullmatch(parts[-1])):
+        parts.pop()
+    return parts[-1] if parts else ""
+
+
+def registered_code(src: Path, entries: list[dict]) -> str | None:
+    """The run code runs.tsv (its entries) has for src, for summaries written before they recorded it. Names tried in
+    order: src's own folder name (a split's merged/ or part<i>/ by its split folder's; a zip by its wrapping folder or
+    its own name, e.g. `get`'s <code>/), then the server folder named in the run / plot log copied next to each
+    summary, so a downloaded folder may have been renamed. A name matches an entry's folder name, or else its code."""
+    names, open_ = _listing(src)
+    paths = summary_paths(src)
+    top = PurePosixPath(src.stem) if src.is_file() else PurePosixPath(src.resolve().as_posix())
+    candidates = [_run_folder_name(top / p.parent) for p in paths] + [_run_folder_name(top)]
+    for p in paths:
+        for log_file in sorted(n for n in names if n.parent == p.parent and n.suffix == ".log"):
+            with open_(log_file) as f:
+                for line in io.TextIOWrapper(f, encoding="utf-8", errors="replace"):
+                    if m := LOG_FOLDER_RE.search(line):
+                        candidates.append(_run_folder_name(PurePosixPath(m[1].replace("\\", "/"))))
+    by_folder = {PurePosixPath(e["folder"]).name: e["code"] for e in entries}
+    codes = {e["code"] for e in entries}
+    for name in dict.fromkeys(c for c in candidates if c):
+        if code := by_folder.get(name) or (name.lower() if name.lower() in codes else None):
+            log.info("%s: summary.csv has no run code; runs.tsv has %s for folder %s", src, code, name)
+            return code
+    return None
+
+
+def load_runs(sources: list[Path], entries: list[dict] | None = None) -> pd.DataFrame:
     """All summaries in one frame. `model` = the group, suffixed with " [<run code>]" when two sources share a group
     (" [<run code>#<i>]" if the same run is the i-th source and another one too); `judge` = "<model> (<effort>)",
-    unique across sources. A shared group in a summary without run codes (written before they were recorded) is an
+    unique across sources. Rows without a run code (summaries written before they were recorded) get the one runs.tsv
+    has for their source (entries = registry.load(), see registered_code); a shared group still without one is an
     error."""
     frames = []
     for i, d in enumerate(sources):
@@ -113,6 +155,8 @@ def load_runs(sources: list[Path]) -> pd.DataFrame:
             df["flops"] = math.nan
         if "code" not in df.columns:
             df["code"] = None
+        if df["code"].isna().any() and entries and (code := registered_code(d, entries)):
+            df["code"] = df["code"].fillna(code)
         df["effort"] = df["effort"].map(_effort).astype(object)
         df["group"] = df.apply(_group, axis=1)
         df["source"] = i
@@ -121,7 +165,8 @@ def load_runs(sources: list[Path]) -> pd.DataFrame:
     shared = df.groupby("group")["source"].transform("nunique") > 1
     if old := sorted({str(sources[i]) for i in df.loc[shared & df["code"].isna(), "source"]}):
         raise ValueError(f"Not supported by compare: {', '.join(old)} {'has' if len(old) == 1 else 'have'} no run code "
-                         f"in summary.csv (written before run codes were recorded there), which is needed to tell apart "
+                         f"in summary.csv (written before run codes were recorded there) and none matched in runs.tsv "
+                         f"(by folder name, or the server folder its copied log names); a code is needed to tell apart "
                          f"the groups several runs share: {sorted(set(df.loc[shared, 'group']))}")
     reused = df.groupby(["group", "code"])["source"].transform("nunique") > 1  # the same run given twice
     df["model"] = [f"{g} [{c}#{s + 1}]" if r else f"{g} [{c}]" if sh else g
@@ -231,11 +276,11 @@ def _cost_grid(df: pd.DataFrame, out: Path, ycol: str, ncols: int, xcol: str = "
     return _finish(fig, _cost_handles(judges, colors), out, ncol=4)
 
 
-def compare_all(sources: list[Path], out_dir: Path, ncols: int = 4) -> list[Path]:
+def compare_all(sources: list[Path], out_dir: Path, ncols: int = 4, entries: list[dict] | None = None) -> list[Path]:
     """The comparison figures for these sources (folders or zips, see the module doc), plus the combined summary they were drawn from: the two bar
     grids, the two cost grids, and the two cost grids with FLOPs as the cost (judges served by our vLLM job). A
     figure no model has data for is skipped."""
-    df = load_runs(sources)
+    df = load_runs(sources, entries)
     out_dir.mkdir(parents=True, exist_ok=True)
     df.to_csv(out_dir / "summary.csv", index=False)
     outs = [_bar_grid(df, out_dir / "bias_grid.png", "value", ncols),
