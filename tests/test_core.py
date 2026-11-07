@@ -818,3 +818,36 @@ def test_compare_names_shared_groups_by_folder_and_skips_missing_data(tmp_path, 
     assert main(["compare", str(b), "--config", str(path), "--log-dir", str(tmp_path / "logs"),
                  "--out-dir", str(only_old)]) == 0
     assert {p.name for p in only_old.glob("*.png")} == {"bias_grid.png"}
+
+
+def test_compare_reads_split_folders_and_export_zips(tmp_path, caplog):
+    import zipfile
+    from judgebias.compare import load_runs, read_source, summary_paths
+    split = tmp_path / "[Split-k7m2]gpt-oss-20b_1106_1200"
+    _summary_dir(split / "part1", "G", ["low", "high"])
+    _summary_dir(split / "part3", "G", ["low", "high"])
+    (split / "part2").mkdir()  # failed / timed out: no summary
+    pd.read_csv(split / "part3" / "summary.csv").assign(bias="cot").to_csv(split / "part3" / "summary.csv", index=False)
+    assert [str(p) for p in summary_paths(split)] == ["part1/summary.csv", "part3/summary.csv"]  # parts only, no merge
+    assert "part2" in caplog.text
+    assert set(read_source(split)["bias"]) == {"position", "cot"}
+
+    stale = _summary_dir(split / "merged", "G", ["low"])  # merged before part3 was rerun: parts win, in order
+    pd.read_csv(stale / "summary.csv").assign(value=0.1).to_csv(stale / "summary.csv", index=False)
+    assert [str(p) for p in summary_paths(split)] == ["merged/summary.csv", "part1/summary.csv", "part3/summary.csv"]
+    assert (read_source(split)["value"] == 0.8).all()
+    assert [str(p) for p in summary_paths(split / "merged")] == ["summary.csv"]
+
+    run = _summary_dir(tmp_path / "plain", "H", ["low"])
+    export = tmp_path / "k7m2.zip"  # `get` export: one wrapping <code>/ folder, no folder entries
+    with zipfile.ZipFile(export, "w") as z:
+        z.write(run / "summary.csv", "k7m2/summary.csv")
+        z.writestr("k7m2/config.yaml", "x: 1\n")
+    df = load_runs([export, split / "merged", split])  # merged/ is named after its split folder
+    assert set(df["source"]) == {"k7m2", "Split-k7m2 gpt-oss-20b_1106_1200#2", "Split-k7m2 gpt-oss-20b_1106_1200#3"}
+
+    (tmp_path / "empty" / "examples").mkdir(parents=True)  # e.g. only examples/ was downloaded
+    with pytest.raises(FileNotFoundError, match="No summary.csv"):
+        summary_paths(tmp_path / "empty")
+    with pytest.raises(FileNotFoundError, match="several runs"):
+        summary_paths(tmp_path)

@@ -50,7 +50,8 @@ def main(argv: list[str] | None = None) -> int:
             sp.add_argument("--bias", action="append", help="bias name (repeatable)")
         if name == "compare":
             sp.add_argument("runs", nargs="+", metavar="RUN",
-                            help="run code, or folder (path or name under results_dir); each folder's groups are models")
+                            help="downloaded run: folder or zip (path or name under results_dir; a vllm_split.sh "
+                                 "folder with merged/ and/or part*/ works too), or run code; each one's groups are models")
         if name == "plot":
             sp.add_argument("--run", action="append",
                             help="run code, or folder (path or name under results_dir), repeatable; later wins on overlap")
@@ -88,7 +89,7 @@ def main(argv: list[str] | None = None) -> int:
         logging.getLogger().setLevel(logging.INFO)  # basicConfig is a no-op if the root logger already has handlers
         logging.info("command=%s config=%s log_file=%s", args.cmd, args.config, log_path)
         if args.cmd == "compare":
-            sources = [_run_dir(cfg, name) for name in args.runs]
+            sources = [_compare_source(cfg, name) for name in args.runs]
             out_dir = _out_dir(cfg, args)
             (out_dir / "sources.txt").write_text("".join(f"{d}\n" for d in sources), encoding="utf-8")
             logging.info("comparing %s -> %s", [d.name for d in sources], out_dir)
@@ -168,6 +169,18 @@ def _sources(cfg, names: list[str], allow_missing: bool) -> list[Path]:
     if not sources:
         raise FileNotFoundError(f"None of the run folders {names} has a summary.csv")
     return sources
+
+
+def _compare_source(cfg, name: str) -> Path:
+    """A compare source as given (folder or zip), else under results_dir, else a registered run code (for a split:
+    its folder, so the parts are read too); compare finds the summary inside."""
+    for path in (Path(name), cfg.results_dir / name):
+        if path.exists():
+            return path
+    if entry := registry.lookup(cfg.results_dir, name):
+        folder = registry.result_dir(cfg.results_dir, entry)
+        return folder.parent if entry["kind"] == "split" else folder
+    raise FileNotFoundError(f"No run folder, zip or run code '{name}' (also looked in {cfg.results_dir})")
 
 
 def _run_dir(cfg, name: str) -> Path:

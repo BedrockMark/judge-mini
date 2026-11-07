@@ -1,4 +1,8 @@
-"""Compare finished runs without calling any model: several results folders' summary.csv -> six figures.
+"""Compare finished runs without calling any model: several downloaded results' summary.csv -> six figures.
+
+A source is a folder or a zip (e.g. from `python -m judgebias get`) holding one run's summary.csv: at its top, in a
+single wrapping subfolder, or a vllm_split.sh folder's merged/ and/or part<i>/ summaries (merged in that order, a later
+one winning on the same judge x bias, so a part rerun after the merge counts and a missing merge is not needed).
 
 Each (folder, group) is one model. In the two bar grids, bars are clustered by effort tier: a model's efforts, sorted
 low to high, fill tiers 1, 2, ... from the bottom, and a model with fewer efforts repeats its highest one in the upper
@@ -9,7 +13,8 @@ from __future__ import annotations
 import logging
 import math
 import re
-from pathlib import Path
+import zipfile
+from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 
 import pandas as pd
@@ -25,6 +30,8 @@ log = logging.getLogger(__name__)
 # Low-to-high effort order used to stack a model's efforts into tiers; unknown values go last, in appearance order.
 EFFORT_ORDER = [None, "none", "off", "minimal", "low", "medium", "high", "on", "xhigh", "max"]
 COPY_HATCH = "////"
+MAX_DEPTH = 3  # how deep below a source to look for summary.csv
+PART_RE = re.compile(r"part(\d+)")
 
 
 def _effort(v) -> str | None:
@@ -40,13 +47,72 @@ def _group(row) -> str:
     return m.group(1) if m and m.group(2) == row["effort"] else str(row["judge"])
 
 
-def load_runs(dirs: list[Path]) -> pd.DataFrame:
-    """All summaries in one frame. `model` = the group, suffixed with " [<folder>]" when two folders share a group;
-    `judge` = "<model> (<effort>)", unique across folders."""
-    names = [d.name for d in dirs]
+def _listing(src: Path) -> tuple[set[PurePosixPath], callable]:
+    """(every file and folder path below src, relative, up to MAX_DEPTH levels; a reader for one of them)."""
+    if src.is_file() and zipfile.is_zipfile(src):
+        with zipfile.ZipFile(src) as z:
+            names = {PurePosixPath(n.rstrip("/")) for n in z.namelist()}
+        names |= {p for n in names for p in n.parents if p != PurePosixPath(".")}  # zips may omit folder entries
+
+        def read(rel):
+            with zipfile.ZipFile(src) as z, z.open(str(rel)) as f:
+                return pd.read_csv(f)
+    else:
+        names = {PurePosixPath(p.relative_to(src).as_posix()) for p in src.rglob("*")
+                 if len(p.relative_to(src).parts) <= MAX_DEPTH}
+
+        def read(rel):
+            return pd.read_csv(src / rel)
+    return {n for n in names if len(n.parts) <= MAX_DEPTH}, read
+
+
+def summary_paths(src: Path) -> list[PurePosixPath]:
+    """The summary.csv files below src that make up its one run, merged in this order (later wins)."""
+    names, _ = _listing(src)
+    found = sorted((n for n in names if n.name == "summary.csv"), key=lambda n: (len(n.parts), str(n)))
+    if PurePosixPath("summary.csv") in found:
+        return [PurePosixPath("summary.csv")]
+    # vllm_split.sh: <split>/merged/ and <split>/part<i>/; <split> may be src itself or one wrapping folder.
+    splits = {n.parent.parent for n in found if n.parent.name == "merged" or PART_RE.fullmatch(n.parent.name)}
+    if len(splits) == 1 and all(n.parent.parent == next(iter(splits)) for n in found):
+        split = splits.pop()
+        parts = sorted((n for n in names if n.parent == split and PART_RE.fullmatch(n.name)),
+                       key=lambda n: int(PART_RE.fullmatch(n.name)[1]))
+        if missing := [p.name for p in parts if p / "summary.csv" not in names]:
+            log.warning("%s: %s have no summary.csv (failed, timed out or not downloaded); their biases are missing "
+                        "unless the merged result has them", src.name, missing)
+        chosen = [split / "merged" / "summary.csv"] + [p / "summary.csv" for p in parts]
+        return [n for n in chosen if n in names]
+    if len(found) == 1:
+        return found
+    if not found:
+        raise FileNotFoundError(f"No summary.csv in {src} (searched {MAX_DEPTH} levels down); "
+                                f"download the run's summary.csv, or its merged/ or part*/ folders for a split job")
+    raise FileNotFoundError(f"{src} holds several runs ({', '.join(map(str, found))}); pass the one to compare")
+
+
+def read_source(src: Path) -> pd.DataFrame:
+    """One source's summary (see the module doc), parts merged."""
+    paths = summary_paths(src)
+    _, read = _listing(src)
+    log.info("%s: reading %s", src, ", ".join(map(str, paths)))
+    df = pd.concat([read(p) for p in paths], ignore_index=True)
+    return df.drop_duplicates(["judge", "bias"], keep="last").reset_index(drop=True)
+
+
+def _source_name(src: Path) -> str:
+    name = src.stem if src.is_file() else src.name
+    name = src.parent.name if name == "merged" else name
+    return re.sub(r"^\[(Split-\w+)\]", r"\1 ", name)  # "[Split-k7m2]x" -> "Split-k7m2 x", shown inside [...]
+
+
+def load_runs(sources: list[Path]) -> pd.DataFrame:
+    """All summaries in one frame. `model` = the group, suffixed with " [<source>]" when two sources share a group;
+    `judge` = "<model> (<effort>)", unique across sources."""
+    names = [_source_name(d) for d in sources]
     frames = []
-    for i, d in enumerate(dirs):
-        df = _with_cost_columns(pd.read_csv(d / "summary.csv"))
+    for i, d in enumerate(sources):
+        df = _with_cost_columns(read_source(d))
         if "flops" not in df.columns:  # summaries written before FLOPs, or without any vLLM judge
             df["flops"] = math.nan
         df["effort"] = df["effort"].map(_effort).astype(object)
@@ -161,11 +227,11 @@ def _cost_grid(df: pd.DataFrame, out: Path, ycol: str, ncols: int, xcol: str = "
     return _finish(fig, _cost_handles(judges, colors), out, ncol=4)
 
 
-def compare_all(dirs: list[Path], out_dir: Path, ncols: int = 4) -> list[Path]:
-    """The comparison figures for these run folders, plus the combined summary they were drawn from: the two bar
+def compare_all(sources: list[Path], out_dir: Path, ncols: int = 4) -> list[Path]:
+    """The comparison figures for these sources (folders or zips, see the module doc), plus the combined summary they were drawn from: the two bar
     grids, the two cost grids, and the two cost grids with FLOPs as the cost (judges served by our vLLM job). A
     figure no model has data for is skipped."""
-    df = load_runs(dirs)
+    df = load_runs(sources)
     out_dir.mkdir(parents=True, exist_ok=True)
     df.to_csv(out_dir / "summary.csv", index=False)
     outs = [_bar_grid(df, out_dir / "bias_grid.png", "value", ncols),

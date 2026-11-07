@@ -32,8 +32,11 @@ uv run pytest                                           # tests (no API calls)
 
 - `run` accepts `--judge "<label>"` and `--bias <name>` (both repeatable) to run a subset. Partial runs are merged into `summary.csv`.
 - `check --no-call` skips the live test calls.
-- `compare RUN [RUN ...]` (run codes or folders, like `plot --run`) draws finished runs side by side into a new
-  folder, without calling any model: `bias_grid.png` and `correctness_grid.png` cluster the bars by effort tier, and
+- `compare RUN [RUN ...]` draws finished runs side by side into a new folder, without calling any model. A RUN is
+  what you downloaded from the server — a folder or a zip (e.g. from `get`), as a path or a name under `results_dir` —
+  or a run code. Only `summary.csv` is needed: at the top, inside one wrapping folder, or, for a `vllm_split.sh`
+  folder, its `merged/` and/or `part*/` summaries (merged in that order, later wins; missing parts are warned about).
+  Figures: `bias_grid.png` and `correctness_grid.png` cluster the bars by effort tier, and
   `cost_vs_performance.png` / `cost_vs_correctness.png` (and their `_flops` versions, for judges with FLOPs) overlay
   all judges. Each (folder, group) is one model (named
   `group [folder]` when two folders share a group). Tiers are bottom-aligned: each model's efforts, low to high, fill
