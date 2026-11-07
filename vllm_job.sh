@@ -3,26 +3,21 @@
 #SBATCH --output=./job_log/%j.out
 #SBATCH --error=./job_log/%j.err
 #SBATCH --ntasks=1
-#SBATCH --mail-type=begin,end,fail
+#SBATCH --mail-type=begin,fail        # one mail when a part starts, one more only if it fails / times out
 # GPUs, CPUs, memory, time and the mail address (EMAIL in .env) are passed to sbatch by the login-node half below.
 
-# One job runs everything: vLLM server(s) on the job's GPUs + the judgebias client against them.
-#
-# Run on the LOGIN node with bash (it downloads the model, which needs internet); it then sbatches itself:
-#   bash vllm_job.sh                                        # openai/gpt-oss-20b, check + full run
-#   bash vllm_job.sh openai/gpt-oss-120b                    # GPU count picked from the model size
-#   bash vllm_job.sh openai/gpt-oss-20b --bias position     # extra args go to `judgebias run`
-#   GPUS=4 bash vllm_job.sh                                 # more GPUs -> more replicas -> faster
-# For a full run prefer vllm_split.sh: same experiment as 3 shorter jobs (start sooner) + an automatic merge.
+# One part of vllm_split.sh: vLLM server(s) on the job's GPUs + the judgebias client against them.
+# Full runs go through vllm_split.sh; call this directly only for a small test:
+#   bash vllm_job.sh openai/gpt-oss-20b --bias position     # on the LOGIN node (downloads the model); it sbatches itself
+# Extra args go to `judgebias run`.
 #
 # Inside the job, TP = the smallest tensor-parallel size whose weights fit in 70% of one GPU (the rest is KV
 # cache); every further group of TP GPUs runs an independent replica, and the client load-balances over them.
 #
 # Env overrides (login node): CONFIG (config.vllm.yaml), GPUS (auto), GPU_TYPE (any), GPU_MEM_GB (48, for the
-#   auto GPU count), JOB_TIME (auto, see below), TIME_FACTOR (3 parts = full run; vllm_split.sh 1),
-#   SEC_PER_SAMPLE (4), CPUS (2 + 2/GPU), MEM (auto, see below), TP (auto), MAX_MODEL_LEN (32768),
-#   MAX_NUM_SEQS (256 per replica), VLLM_EXTRA_ARGS, READY_TIMEOUT (1800 s), VLLM_VENV (.venv-vllm).
-# Default time = (10 min + SEC_PER_SAMPLE x samples_per_bias x judges of the model x TIME_FACTOR / replicas) x 1.25,
+#   auto GPU count), JOB_TIME (auto, see below), SEC_PER_SAMPLE (4), CPUS (2 + 2/GPU), MEM (auto, see below),
+#   TP (auto), MAX_MODEL_LEN (32768), MAX_NUM_SEQS (256 per replica), VLLM_EXTRA_ARGS, READY_TIMEOUT (1800 s), VLLM_VENV (.venv-vllm).
+# Default time = (10 min + SEC_PER_SAMPLE x samples_per_bias x judges of the model / replicas) x 1.25,
 # rounded up to 15 min; default RAM = (weights + 8 GB/replica) x 1.25. Measured per vllm_split.sh part (~1/3 run):
 #   gpt-oss-20b,  1 GPU, 150 samples x 3 judges: ~30 min wall;  300 samples: 51 min, 0.5 core busy, 18 GB RAM
 #   gpt-oss-120b, 2 GPUs (TP=2), 150 x 3: 32 min wall (~4 min startup), 3 cores busy, 70 GB RAM
@@ -114,7 +109,7 @@ d(sys.argv[1], local_dir=sys.argv[2], ignore_patterns=["original/*", "metal/*"])
     fi
     REPLICAS=$(( GPUS / tp > 0 ? GPUS / tp : 1 ))
     # Time: 10 min startup + SEC_PER_SAMPLE per sample per judge of this model per part, shared by the replicas,
-    # x TIME_FACTOR parts, +25%, rounded up to 15 min, max 24 h.
+    # +25%, rounded up to 15 min, max 24 h.
     read -r SAMPLES NJUDGES <<< "$(.venv/bin/python - "$CONFIG" "$MODEL_ID" <<'EOF'
 import sys
 from judgebias.config import load_config
@@ -122,7 +117,7 @@ cfg = load_config(sys.argv[1])
 print(cfg.samples_per_bias, max(1, sum(j.model == sys.argv[2] for j in cfg.judges)))
 EOF
 )"
-    MINUTES=$(( (600 + ${SEC_PER_SAMPLE:-4} * SAMPLES * NJUDGES * ${TIME_FACTOR:-3} / REPLICAS) * 5 / 4 / 60 ))
+    MINUTES=$(( (600 + ${SEC_PER_SAMPLE:-4} * SAMPLES * NJUDGES / REPLICAS) * 5 / 4 / 60 ))
     MINUTES=$(( (MINUTES + 14) / 15 * 15 ))
     (( MINUTES <= 1440 )) || MINUTES=1440
     # RAM: the weights (read through the page cache, which counts against --mem) + 8 GB per replica, +25%.

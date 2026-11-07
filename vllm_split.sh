@@ -17,7 +17,7 @@
 # than one job and need about the same output tokens each. Every part runs all of the model's judges, which
 # self_enhancement needs (judges score each other).
 #
-# Env overrides: PARTS (groups separated by ';', biases by ','), JOB_TIME (per part; default from samples x judges, see vllm_job.sh: TIME_FACTOR=1), CONFIG
+# Env overrides: PARTS (groups separated by ';', biases by ','), JOB_TIME (per part; default from samples x judges, see vllm_job.sh), CONFIG
 #   (config.vllm.yaml), plus everything vllm_job.sh reads.
 # Output: <results_dir>/[Split-<code>]<model>_<mmdd_HHMM>/part<i>/ per job (<model>: MODEL_ID after the last /), merged/ (full result, like a single run),
 #   config.yaml (snapshot of CONFIG at submission: every part, the merge and --resume use it, so CONFIG can be
@@ -25,13 +25,14 @@
 #   `python -m judgebias runs`; once merged, `python -m judgebias get <code>` zips merged/'s result files.
 # Jobs are named after the run code: <code>_<model> for the parts, <code>_merge for the merge.
 # The merge runs even if a part failed (without it); `--resume <code>` then reruns just that part and re-merges.
+# Mail (EMAIL in .env): each part when it starts and if it fails, the merge when it ends -> 4 mails for a clean run.
 
 set -euo pipefail
 cd "$(dirname "$0")"
 # Notification address: EMAIL=... in .env, passed to the merge job's sbatch as --mail-user (vllm_job.sh does the same for the parts).
 email=$(sed -n 's/^EMAIL=//p' .env 2>/dev/null | tr -d "\r\"'" | tail -1) || true
 # vllm_job.sh settings a resume reuses unless they are set again.
-SAVED_ENV=(JOB_TIME TIME_FACTOR SEC_PER_SAMPLE GPUS GPU_TYPE GPU_MEM_GB CPUS MEM TP MAX_MODEL_LEN MAX_NUM_SEQS VLLM_EXTRA_ARGS READY_TIMEOUT VLLM_VENV)
+SAVED_ENV=(JOB_TIME SEC_PER_SAMPLE GPUS GPU_TYPE GPU_MEM_GB CPUS MEM TP MAX_MODEL_LEN MAX_NUM_SEQS VLLM_EXTRA_ARGS READY_TIMEOUT VLLM_VENV)
 GIVEN_JOB_TIME=${JOB_TIME:-}
 JOBS=() MERGE_JOB=
 
@@ -57,7 +58,7 @@ else
     PARTS=${PARTS:-position,compassion_fade,bandwagon,distraction,diversity;authority,sentiment;verbosity,fallacy_oversight,cot,refinement_aware,self_enhancement}
     EXTRA=("$@")
 fi
-export CONFIG TIME_FACTOR=${TIME_FACTOR:-1}   # a part is ~1/3 of a full run, not vllm_job.sh's 3x
+export CONFIG
 IFS=';' read -ra GROUPS_ <<< "$PARTS"
 
 # Fail before submitting anything if a bias is misspelled or one the config selects is in no group.
@@ -134,8 +135,8 @@ if [[ -n $MERGE_JOB ]]; then  # resuming: the earlier merge is stale (or would s
     scancel "$MERGE_JOB" 2>/dev/null || true
     rm -rf "$OUT/merged"
 fi
-# afterany: merge whatever parts finished, even if one failed or timed out.
-MERGE_JOB=$(sbatch --parsable ${email:+"--mail-user=$email"} --job-name="${CODE}_merge" ${DEPS[@]:+--dependency="afterany:$(IFS=:; echo "${DEPS[*]}")"} \
+# afterany: merge whatever parts finished, even if one failed or timed out. Mail only when it ends (one mail, failed or not).
+MERGE_JOB=$(sbatch --parsable ${email:+"--mail-user=$email"} --mail-type=end,fail --job-name="${CODE}_merge" ${DEPS[@]:+--dependency="afterany:$(IFS=:; echo "${DEPS[*]}")"} \
     --time=00:30:00 --cpus-per-task=1 --mem=4G \
     job.sh plot --config "$CONFIG" --allow-missing "${RUNS[@]}" --out-dir "$OUT/merged" --code "$CODE" | cut -d';' -f1)
 save
