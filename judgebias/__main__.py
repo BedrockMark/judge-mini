@@ -1,4 +1,4 @@
-"""CLI: python -m judgebias {check,run,plot,runs,get,snapshot} --config config.yaml"""
+"""CLI: python -m judgebias {check,run,plot,compare,runs,get,snapshot} --config config.yaml"""
 from __future__ import annotations
 
 import argparse
@@ -11,6 +11,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .check import run_check
+from .compare import compare_all
 from . import registry
 from .config import ConfigError, config_origin, load_config, snapshot_config
 from .plot import plot_all
@@ -23,13 +24,14 @@ def main(argv: list[str] | None = None) -> int:
     for name, help_ in [("check", "validate config and .env keys, then make one test call per judge"),
                         ("run", "run judges x biases, then plot"),
                         ("plot", "plot the latest run (or merge several with --run) into a new folder"),
+                        ("compare", "compare finished runs side by side (no model calls) into a new folder"),
                         ("runs", "list run codes"),
                         ("get", "zip just the result files of the run with this code, for download"),
                         ("snapshot", "copy the config with absolute paths into a new run folder (or dest), for a job that reads it later")]:
         sp = sub.add_parser(name, help=help_)
         sp.add_argument("--config", default="config.yaml")
         sp.add_argument("--log-dir", help="directory for the log file (default: <results_dir>/logs)")
-        if name in ("run", "plot", "snapshot"):
+        if name in ("run", "plot", "compare", "snapshot"):
             sp.add_argument("--out-dir", help="write here (must be new or empty) instead of results_dir/<timestamp>")
         if name in ("run", "plot"):
             sp.add_argument("--part-of", metavar="CODE", help=argparse.SUPPRESS)  # vllm_split.sh: no code of its own
@@ -46,6 +48,9 @@ def main(argv: list[str] | None = None) -> int:
         if name == "run":
             sp.add_argument("--judge", action="append", help="judge label (repeatable)")
             sp.add_argument("--bias", action="append", help="bias name (repeatable)")
+        if name == "compare":
+            sp.add_argument("runs", nargs="+", metavar="RUN",
+                            help="run code, or folder (path or name under results_dir); each folder's groups are models")
         if name == "plot":
             sp.add_argument("--run", action="append",
                             help="run code, or folder (path or name under results_dir), repeatable; later wins on overlap")
@@ -82,6 +87,14 @@ def main(argv: list[str] | None = None) -> int:
         logging.getLogger().addHandler(fh)
         logging.getLogger().setLevel(logging.INFO)  # basicConfig is a no-op if the root logger already has handlers
         logging.info("command=%s config=%s log_file=%s", args.cmd, args.config, log_path)
+        if args.cmd == "compare":
+            sources = [_run_dir(cfg, name) for name in args.runs]
+            out_dir = _out_dir(cfg, args)
+            (out_dir / "sources.txt").write_text("".join(f"{d}\n" for d in sources), encoding="utf-8")
+            logging.info("comparing %s -> %s", [d.name for d in sources], out_dir)
+            for out in compare_all(sources, out_dir):
+                print(f"Wrote {out}")
+            return 0
         if args.cmd == "check":
             return 0 if run_check(cfg, live=not args.no_call) else 1
         if args.cmd == "run":

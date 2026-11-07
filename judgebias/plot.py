@@ -1,5 +1,6 @@
-"""summary.csv -> figures: the 3x4 grid of bias panels (one bar per judge) mirroring the paper's figure, plus
-cost (mean output tokens per call) vs. metric / Correctness per bias, and the overall utility plot + table. Runs
+"""summary.csv -> figures: the 3x4 grids of bias panels (one bar per judge) of each bias's metric, mirroring the
+paper's figure, and of Correctness; cost (mean output tokens per call) vs. metric / Correctness per bias; and the
+overall utility plot + table. Runs
 whose judges were served by our vLLM job also get the two per-bias cost grids with FLOPs per call as the cost."""
 from __future__ import annotations
 
@@ -96,10 +97,10 @@ def _style(ax, title: str, ylabel: str) -> None:
         ax.spines[side].set_color("#c3c2b7")
 
 
-def _finish(fig, handles: list, out: Path) -> Path:
-    fig.legend(handles=handles, loc="lower center", ncol=min(len(handles), 7), frameon=True,
+def _finish(fig, handles: list, out: Path, ncol: int = 7) -> Path:
+    fig.legend(handles=handles, loc="lower center", ncol=min(len(handles), ncol), frameon=True,
                fontsize=9, bbox_to_anchor=(0.5, 0.0))
-    legend_rows = math.ceil(len(handles) / 7)
+    legend_rows = math.ceil(len(handles) / ncol)
     fig.tight_layout(rect=(0, 0.05 * legend_rows + 0.02, 1, 1))
     out.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out, dpi=200)
@@ -107,29 +108,43 @@ def _finish(fig, handles: list, out: Path) -> Path:
     return out
 
 
-def plot_summary(cfg: Config, summary: pd.DataFrame, out: Path, ncols: int = 4) -> Path:
+def _bar_grid(cfg: Config, summary: pd.DataFrame, out: Path, ycol: str, ncols: int) -> Path:
+    """One bar per judge per bias panel: ycol "value" = the panel's own metric, "correctness" = Correctness."""
     judges, colors = _judges_and_colors(cfg, summary)
+    if ycol == "correctness":  # bars grouped by model (config entry), effort ascending within each
+        judges = [j for members in _groups(judges).values() for j in members]
     fig, panels = _panel_grid(summary, ncols)
     for ax, name in panels:
         bias = BIASES[name]
+        metric = bias.metric if ycol == "value" else "accuracy"
         df = summary[summary["bias"] == name].set_index("judge")
-        values = [float(df.loc[j.label, "value"]) if j.label in df.index else math.nan for j in judges]
+        values = [float(df.loc[j.label, ycol]) if j.label in df.index else math.nan for j in judges]
         ax.bar(range(len(judges)), values, width=0.8, color=[colors[j.label] for j in judges],
                edgecolor="white", linewidth=1.5, zorder=2)
 
-        # Reference: mean consistency rate for robustness panels, mean metric otherwise.
-        ref_col = "cr" if bias.metric == "robustness" else "value"
+        # Reference: mean consistency rate for robustness panels, mean of the plotted column otherwise.
+        ref_col = "cr" if ycol == "value" and bias.metric == "robustness" else ycol
         ref = pd.to_numeric(df[ref_col], errors="coerce").mean()
         if not math.isnan(ref):
             ax.axhline(ref, color=REF_COLOR, linestyle="--", linewidth=1.2, zorder=3)
 
-        ax.set_ylim(*_ylim(bias.metric, values + [ref]))
-        _style(ax, bias.title, Y_LABEL[bias.metric])
+        ax.set_ylim(*_ylim(metric, values + [ref]))
+        _style(ax, bias.title, Y_LABEL[bias.metric] if ycol == "value" else "Correctness")
         ax.set_xticks([])
 
     handles = [Patch(facecolor=colors[j.label], label=j.label) for j in judges]
-    handles.append(Line2D([0], [0], color=REF_COLOR, linestyle="--", label="CR / Avg."))
+    handles.append(Line2D([0], [0], color=REF_COLOR, linestyle="--", label="CR / Avg." if ycol == "value" else "Avg."))
     return _finish(fig, handles, out)
+
+
+def plot_summary(cfg: Config, summary: pd.DataFrame, out: Path, ncols: int = 4) -> Path:
+    """Per bias: one bar per judge showing that bias's metric (the paper's figure)."""
+    return _bar_grid(cfg, summary, out, "value", ncols)
+
+
+def plot_correctness_bars(cfg: Config, summary: pd.DataFrame, out: Path, ncols: int = 4) -> Path:
+    """Per bias: one bar per judge showing Correctness, judges ordered by model, then effort."""
+    return _bar_grid(cfg, _with_cost_columns(summary), out, "correctness", ncols)
 
 
 # --- cost plots ---------------------------------------------------------------------------------
@@ -281,9 +296,10 @@ def plot_all(cfg: Config, summary: pd.DataFrame, out_dir: Path) -> list[Path]:
     table.to_csv(out_dir / "utility.csv", index=False)
     outs = [plot_summary(cfg, summary, out_dir / "bias_grid.png"),
             plot_cost_performance(cfg, summary, out_dir / "cost_vs_performance.png"),
-            plot_correctness(cfg, summary, out_dir / "correctness_grid.png"),
+            plot_correctness_bars(cfg, summary, out_dir / "correctness_grid.png"),
+            plot_correctness(cfg, summary, out_dir / "cost_vs_correctness.png"),
             plot_utility(cfg, summary, out_dir / "utility.png", table)]
     if "flops" in summary.columns and pd.to_numeric(summary["flops"], errors="coerce").gt(0).any():
         outs += [plot_cost_performance(cfg, summary, out_dir / "cost_vs_performance_flops.png", xcol="flops"),
-                 plot_correctness(cfg, summary, out_dir / "correctness_grid_flops.png", xcol="flops")]
+                 plot_correctness(cfg, summary, out_dir / "cost_vs_correctness_flops.png", xcol="flops")]
     return outs

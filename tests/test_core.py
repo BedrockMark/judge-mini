@@ -414,7 +414,8 @@ def test_each_command_writes_a_new_timestamped_folder(tmp_path):
     first, second = runs()
     for d in (first, second):
         names = {p.name for p in d.iterdir()}
-        assert {"summary.csv", "bias_grid.png", "cost_vs_performance.png", "correctness_grid.png", "utility.png",
+        assert {"summary.csv", "bias_grid.png", "cost_vs_performance.png", "correctness_grid.png",
+                "cost_vs_correctness.png", "utility.png",
                 "utility.csv", "examples.zip", "config.yaml"} <= names
         assert not names & {"raw", "raw.zip", "examples"}  # no raw output; examples/ deleted once zipped
         with zipfile.ZipFile(d / "examples.zip") as z:
@@ -758,7 +759,7 @@ def test_flops_scaled_to_vllm_counter_and_flop_plots_drawn(tmp_path, monkeypatch
     assert s.loc[("G (high)", "cot"), "flops"] > s.loc[("G (low)", "cot"), "flops"]
     assert s.loc["api"]["flops"].isna().all() and s.loc["api"]["flops_scale"].isna().all()
     names = {p.name for p in plot_all(cfg, s.reset_index(), out)}
-    assert {"cost_vs_performance_flops.png", "correctness_grid_flops.png"} <= names
+    assert {"cost_vs_performance_flops.png", "cost_vs_correctness_flops.png"} <= names
 
 
 def test_no_flop_plots_without_flop_data(tmp_path):
@@ -770,3 +771,50 @@ def test_no_flop_plots_without_flop_data(tmp_path):
     s = asyncio.run(run(cfg, out))
     assert s["flops"].isna().all()
     assert not any("flops" in p.name for p in plot_all(cfg, s, out))
+
+
+# --- compare ------------------------------------------------------------------------------------
+
+def _summary_dir(path: Path, group: str, efforts: list, cost: bool = True, flops: bool = False) -> Path:
+    path.mkdir(parents=True)
+    rows = [{"judge": f"{group} ({e})", "group": group, "model": "m", "effort": e, "bias": "position",
+             "metric": "robustness", "value": 0.8, "cr": 0.9, "n": 3, "n_invalid": 0, "extra": "{}",
+             **({"correctness": 0.5 + 0.1 * i, "calls": 3, "out_tokens": 100.0 * (i + 1),
+                 "flops": 1e12 * (i + 1) if flops else math.nan} if cost else {})}
+            for i, e in enumerate(efforts)]
+    pd.DataFrame(rows).to_csv(path / "summary.csv", index=False)
+    return path
+
+
+def test_compare_tiers_align_bottom_and_repeat_highest(tmp_path):
+    from judgebias.compare import _models, load_runs, tiers
+    a = _summary_dir(tmp_path / "r1", "A", ["on", "off"])
+    b = _summary_dir(tmp_path / "r2", "B", ["high", "low", "medium"])
+    layers = tiers(_models(load_runs([a, b])))
+    assert [[(j.label, rep) for j, rep in t] for t in layers] == [
+        [("A (off)", False), ("B (low)", False)],
+        [("A (on)", False), ("B (medium)", False)],
+        [("A (on)", True), ("B (high)", False)]]
+
+
+def test_compare_names_shared_groups_by_folder_and_skips_missing_data(tmp_path, capsys):
+    from judgebias.__main__ import main
+    from judgebias.compare import load_runs
+    a = _summary_dir(tmp_path / "r1", "G", ["low"], flops=True)
+    b = _summary_dir(tmp_path / "r2", "G", ["low", "high"], cost=False)
+    assert set(load_runs([a, b])["judge"]) == {"G [r1] (low)", "G [r2] (low)", "G [r2] (high)"}
+    path = tmp_path / "config.yaml"
+    import yaml
+    path.write_text(yaml.safe_dump({"dataset_dir": str(DATASET), "env_file": None, "results_dir": str(tmp_path),
+                                    "providers": {"fake": {"protocol": "fake"}},
+                                    "judges": [{"label": "x", "provider": "fake", "model": "m"}]}), encoding="utf-8")
+    out = tmp_path / "cmp"
+    assert main(["compare", "r1", str(b), "--config", str(path), "--log-dir", str(tmp_path / "logs"),
+                 "--out-dir", str(out)]) == 0
+    assert {p.name for p in out.glob("*.png")} == {"bias_grid.png", "correctness_grid.png",
+                                                  "cost_vs_performance.png", "cost_vs_correctness.png",
+                                                  "cost_vs_performance_flops.png", "cost_vs_correctness_flops.png"}
+    only_old = tmp_path / "cmp2"
+    assert main(["compare", str(b), "--config", str(path), "--log-dir", str(tmp_path / "logs"),
+                 "--out-dir", str(only_old)]) == 0
+    assert {p.name for p in only_old.glob("*.png")} == {"bias_grid.png"}

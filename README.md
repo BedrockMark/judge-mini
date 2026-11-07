@@ -26,11 +26,20 @@ uv run python -m judgebias check --config config.yaml   # validate config + keys
 uv run python -m judgebias run   --config config.yaml   # run judges x biases -> results/<timestamp>/summary.csv + figures
 uv run python -m judgebias plot  --config config.yaml   # redraw the newest run into a new results/<timestamp>/
 uv run python -m judgebias plot  --config config.yaml --run 20261103_150000 --run 20261103_160000  # merge runs
+uv run python -m judgebias compare --config config.yaml GPT-20b-n3 Qwen27-122  # compare finished runs, no model calls
 uv run pytest                                           # tests (no API calls)
 ```
 
 - `run` accepts `--judge "<label>"` and `--bias <name>` (both repeatable) to run a subset. Partial runs are merged into `summary.csv`.
 - `check --no-call` skips the live test calls.
+- `compare RUN [RUN ...]` (run codes or folders, like `plot --run`) draws finished runs side by side into a new
+  folder, without calling any model: `bias_grid.png` and `correctness_grid.png` cluster the bars by effort tier, and
+  `cost_vs_performance.png` / `cost_vs_correctness.png` (and their `_flops` versions, for judges with FLOPs) overlay
+  all judges. Each (folder, group) is one model (named
+  `group [folder]` when two folders share a group). Tiers are bottom-aligned: each model's efforts, low to high, fill
+  T1, T2, … and a model with fewer efforts repeats its highest one upward (hatched). E.g. A `off/on` with B
+  `low/medium/high` gives T1 = A off, B low; T2 = A on, B medium; T3 = A on (repeated), B high. A model whose
+  summary lacks the needed columns (older runs) is left out of that figure.
 - Offline dry run with fake judges (no keys, no cost): `uv run python -m judgebias run --config config.fake.yaml`.
 
 ### `check`
@@ -153,9 +162,10 @@ Invalid = a verdict/score needed for the comparison could not be parsed (or the 
 |---|---|
 | `bias_grid.png` | the 3×4 grid above: one bar per judge per bias |
 | `cost_vs_performance.png` | per bias: mean output tokens per call (x, log) vs. that bias's metric (y) |
-| `correctness_grid.png` | per bias: mean output tokens per call (x, log) vs. Correctness (y) |
+| `correctness_grid.png` | same grid, one bar per judge per bias showing Correctness; bars ordered by model (config entry), then effort |
+| `cost_vs_correctness.png` | per bias: mean output tokens per call (x, log) vs. Correctness (y) |
 | `utility.png` + `utility.csv` | per judge: mean output tokens per call over all its calls (x) vs. mean Correctness across biases (y; error bar = std across biases) |
-| `cost_vs_performance_flops.png`, `correctness_grid_flops.png` | the two cost grids with mean FLOPs per call as the cost; only for judges served by `vllm_job.sh` / `vllm_split.sh` |
+| `cost_vs_performance_flops.png`, `cost_vs_correctness_flops.png` | the two cost grids with mean FLOPs per call as the cost; only for judges served by `vllm_job.sh` / `vllm_split.sh` |
 
 **Correctness** = `n_correct / samples` over every judged call of that judge × bias (the correct/wrong/invalid rule
 above; invalid counts as not correct; `examples/` only shows a few of them), so every bias is on the same 0–1,
