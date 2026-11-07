@@ -27,9 +27,8 @@ if [[ -z ${SLURM_JOB_ID:-} ]]; then
     # ------------------------------------------------------------ login node: snapshot the config, then submit
     cd "$(dirname "$0")"
     mkdir -p job_log
-    # Notification address: EMAIL=... in .env (sbatch reads SBATCH_MAIL_USER as --mail-user).
-    email=$(sed -n 's/^EMAIL=//p' .env 2>/dev/null | tr -d '\r"' | tail -1) || true
-    [[ -z $email || -n ${SBATCH_MAIL_USER:-} ]] || export SBATCH_MAIL_USER=$email
+    # Notification address: EMAIL=... in .env, passed to sbatch as --mail-user.
+    email=$(sed -n 's/^EMAIL=//p' .env 2>/dev/null | tr -d "\r\"'" | tail -1) || true
     args=("$@") config=config.yaml at= out_dir=() out=
     for i in "${!args[@]}"; do
         case ${args[i]} in
@@ -57,7 +56,7 @@ if [[ -z ${SLURM_JOB_ID:-} ]]; then
         if [[ -n $out ]] && (( ${#out_dir[@]} == 0 )); then args+=(--out-dir "$out"); fi
     fi
     # shellcheck disable=SC2086  # SBATCH_ARGS is intentionally word-split
-    sbatch ${SBATCH_ARGS:-} job.sh "${args[@]}"
+    sbatch ${email:+"--mail-user=$email"} ${SBATCH_ARGS:-} job.sh "${args[@]}"
     echo "config snapshot: $snap"
     exit 0
 fi

@@ -50,9 +50,8 @@ if [[ ${VLLM_JOB_STAGE:-} != run ]]; then
         fi
     done
     mkdir -p job_log model
-    # Notification address: EMAIL=... in .env (sbatch reads SBATCH_MAIL_USER as --mail-user).
-    email=$(sed -n 's/^EMAIL=//p' .env 2>/dev/null | tr -d '\r"' | tail -1) || true
-    [[ -z $email || -n ${SBATCH_MAIL_USER:-} ]] || export SBATCH_MAIL_USER=$email
+    # Notification address: EMAIL=... in .env, passed to sbatch as --mail-user.
+    email=$(sed -n 's/^EMAIL=//p' .env 2>/dev/null | tr -d "\r\"'" | tail -1) || true
 
     # Fail now, not after the queue, if the config is broken or has no judge for this model
     # (the real URL/key only exist inside the job, hence the placeholders).
@@ -96,7 +95,7 @@ d(sys.argv[1], local_dir=sys.argv[2], ignore_patterns=["original/*", "metal/*"])
     fi
 
     HOURS=$(( ${TIME_FACTOR:-3} * GPUS * GPUS < 24 ? ${TIME_FACTOR:-3} * GPUS * GPUS : 24 ))
-    JOB=$(sbatch --parsable --job-name="jb_vllm_${MODEL_ID##*/}" --gres="gpu:${GPU_TYPE:+$GPU_TYPE:}$GPUS" --cpus-per-task="${CPUS:-$((4 * GPUS))}" \
+    JOB=$(sbatch --parsable ${email:+"--mail-user=$email"} --job-name="jb_vllm_${MODEL_ID##*/}" --gres="gpu:${GPU_TYPE:+$GPU_TYPE:}$GPUS" --cpus-per-task="${CPUS:-$((4 * GPUS))}" \
         --mem="${MEM:-$((16 + 16 * GPUS))G}" --time="${JOB_TIME:-$HOURS:00:00}" \
         --export="ALL,VLLM_JOB_STAGE=run,MODEL_ID=$MODEL_ID,CONFIG=$CONFIG,VLLM_VENV=$VLLM_VENV" \
         vllm_job.sh "$@" | cut -d';' -f1)

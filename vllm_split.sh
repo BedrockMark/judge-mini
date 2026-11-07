@@ -27,9 +27,8 @@
 
 set -euo pipefail
 cd "$(dirname "$0")"
-# Notification address: EMAIL=... in .env (sbatch reads SBATCH_MAIL_USER as --mail-user).
-email=$(sed -n 's/^EMAIL=//p' .env 2>/dev/null | tr -d '\r"' | tail -1) || true
-[[ -z $email || -n ${SBATCH_MAIL_USER:-} ]] || export SBATCH_MAIL_USER=$email
+# Notification address: EMAIL=... in .env, passed to the merge job's sbatch as --mail-user (vllm_job.sh does the same for the parts).
+email=$(sed -n 's/^EMAIL=//p' .env 2>/dev/null | tr -d "\r\"'" | tail -1) || true
 # vllm_job.sh settings a resume reuses unless they are set again.
 SAVED_ENV=(JOB_TIME TIME_FACTOR GPUS GPU_TYPE GPU_MEM_GB CPUS MEM TP MAX_MODEL_LEN MAX_NUM_SEQS VLLM_EXTRA_ARGS READY_TIMEOUT VLLM_VENV)
 GIVEN_JOB_TIME=${JOB_TIME:-}
@@ -135,7 +134,7 @@ if [[ -n $MERGE_JOB ]]; then  # resuming: the earlier merge is stale (or would s
     rm -rf "$OUT/merged"
 fi
 # afterany: merge whatever parts finished, even if one failed or timed out.
-MERGE_JOB=$(sbatch --parsable --job-name="jb_merge_${MODEL_ID##*/}" ${DEPS[@]:+--dependency="afterany:$(IFS=:; echo "${DEPS[*]}")"} \
+MERGE_JOB=$(sbatch --parsable ${email:+"--mail-user=$email"} --job-name="jb_merge_${MODEL_ID##*/}" ${DEPS[@]:+--dependency="afterany:$(IFS=:; echo "${DEPS[*]}")"} \
     --time=00:30:00 --cpus-per-task=1 --mem=4G \
     job.sh plot --config "$CONFIG" --allow-missing "${RUNS[@]}" --out-dir "$OUT/merged" --part-of "$CODE" | cut -d';' -f1)
 save
