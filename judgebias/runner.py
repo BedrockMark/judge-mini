@@ -29,9 +29,10 @@ log = logging.getLogger(__name__)
 # rows), correctness = n_correct / samples; out_tokens = mean output tokens (thinking included) per call, over calls
 # whose usage is known (NaN if none, e.g. all answers came from an older cache). flops = mean FLOPs per call (judges on
 # a `flops` provider only, else NaN): the per-call estimate times flops_scale = vLLM's measured FLOPs over the run /
-# the estimates' sum (NaN if the server's counter could not be read; flops is then the bare estimate).
+# the estimates' sum (NaN if the server's counter could not be read; flops is then the bare estimate). code = the run
+# code of the folder holding this summary (a split's parts and merge: the split's code; a `plot` merge: its own).
 SUMMARY_COLUMNS = ["judge", "group", "model", "effort", "bias", "metric", "value", "cr", "n", "n_invalid", "samples",
-                   "n_correct", "n_wrong", "correctness", "calls", "out_tokens", "flops", "flops_scale", "extra"]
+                   "n_correct", "n_wrong", "correctness", "calls", "out_tokens", "flops", "flops_scale", "extra", "code"]
 
 
 def slug(text: str) -> str:
@@ -117,7 +118,7 @@ def flop_providers(cfg: Config, judges) -> dict[str, tuple[FlopModel, int]]:
 
 
 async def run(cfg: Config, out_dir: Path, judge_filter: list[str] | None = None,
-              bias_filter: list[str] | None = None) -> pd.DataFrame:
+              bias_filter: list[str] | None = None, code: str | None = None) -> pd.DataFrame:
     keys = resolve_keys(cfg)  # fails fast on missing keys, before any call
     require_dataset(cfg)
     judges = [j for j in cfg.judges if not judge_filter or j.label in judge_filter]
@@ -150,7 +151,7 @@ async def run(cfg: Config, out_dir: Path, judge_filter: list[str] | None = None,
                 "n_invalid": res.n_invalid, "samples": len(res.samples), "n_correct": counts["correct"],
                 "n_wrong": counts["wrong"],
                 "correctness": counts["correct"] / len(res.samples) if res.samples else math.nan,
-                "extra": json.dumps(res.extra)}
+                "extra": json.dumps(res.extra), "code": code}
 
     try:
         rows = await asyncio.gather(*(one(j, b) for j in judges for b in biases))

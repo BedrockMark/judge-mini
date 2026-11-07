@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=jb_vllm
+#SBATCH --job-name=jb_vllm             # replaced by <run code>_<model> at submission
 #SBATCH --output=./job_log/%j.out
 #SBATCH --error=./job_log/%j.err
 #SBATCH --ntasks=1
@@ -27,6 +27,8 @@
 # The job runs with a snapshot of CONFIG taken at submission, so CONFIG can be edited and resubmitted for another
 # test while this one is still queued. The snapshot is the run's results/<timestamp>/config.yaml (folder created at
 # submission, or the --out-dir given) and is kept there with the results.
+# The job is named <run code>_<model> (e.g. k7m2_gpt-oss-20b): the code is drawn at submission (or vllm_split.sh's,
+# passed as --code) and is the one the results are registered under.
 # Logs: job_log/<jobid>.out (client, last line result=PASS/FAIL), job_log/<jobid>_vllm<i>.log (replica i).
 # vLLM runs with --enable-mfu-metrics, so the results also get FLOPs per call and the FLOP cost plots.
 
@@ -57,16 +59,24 @@ if [[ ${VLLM_JOB_STAGE:-} != run ]]; then
     # (the real URL/key only exist inside the job, hence the placeholders).
     VLLM_BASE_URL=http://placeholder VLLM_API_KEY=placeholder \
         .venv/bin/python -m judgebias check --config "$CONFIG" --model "$MODEL_ID" --no-call --log-dir job_log
+    out_dir=() code=
+    for ((i = 1; i <= $#; i++)); do
+        j=$((i + 1))
+        case ${!i} in
+            --out-dir) out_dir=(--out-dir "${!j:?--out-dir needs a folder}") ;;
+            --out-dir=*) out_dir=(--out-dir "${!i#--out-dir=}") ;;
+            --code) code=${!j:?--code needs a run code} ;;
+            --code=*) code=${!i#--code=} ;;
+        esac
+    done
+    # The run code (vllm_split.sh passes its own) names the job; the run registers under it when it starts.
+    if [[ -z $code ]]; then
+        code=$(.venv/bin/python -m judgebias newcode --config "$CONFIG")
+        set -- "$@" --code "$code"
+    fi
     # Freeze the config now (vllm_split.sh passes one it already froze): the job reads it only once it starts.
     # The snapshot is the run's own results/<timestamp>/config.yaml and stays there with the results.
     if ! head -1 "$CONFIG" | grep -q '^# judgebias config snapshot of '; then
-        out_dir=()
-        for ((i = 1; i <= $#; i++)); do
-            case ${!i} in
-                --out-dir) j=$((i + 1)); out_dir=(--out-dir "${!j:?--out-dir needs a folder}") ;;
-                --out-dir=*) out_dir=(--out-dir "${!i#--out-dir=}") ;;
-            esac
-        done
         CONFIG=$(.venv/bin/python -m judgebias snapshot --config "$CONFIG" "${out_dir[@]}")
         (( ${#out_dir[@]} )) || set -- "$@" --out-dir "$(dirname "$CONFIG")"
     fi
@@ -95,11 +105,11 @@ d(sys.argv[1], local_dir=sys.argv[2], ignore_patterns=["original/*", "metal/*"])
     fi
 
     HOURS=$(( ${TIME_FACTOR:-3} * GPUS * GPUS < 24 ? ${TIME_FACTOR:-3} * GPUS * GPUS : 24 ))
-    JOB=$(sbatch --parsable ${email:+"--mail-user=$email"} --job-name="jb_vllm_${MODEL_ID##*/}" --gres="gpu:${GPU_TYPE:+$GPU_TYPE:}$GPUS" --cpus-per-task="${CPUS:-$((4 * GPUS))}" \
+    JOB=$(sbatch --parsable ${email:+"--mail-user=$email"} --job-name="${code}_${MODEL_ID##*/}" --gres="gpu:${GPU_TYPE:+$GPU_TYPE:}$GPUS" --cpus-per-task="${CPUS:-$((4 * GPUS))}" \
         --mem="${MEM:-$((16 + 16 * GPUS))G}" --time="${JOB_TIME:-$HOURS:00:00}" \
         --export="ALL,VLLM_JOB_STAGE=run,MODEL_ID=$MODEL_ID,CONFIG=$CONFIG,VLLM_VENV=$VLLM_VENV" \
         vllm_job.sh "$@" | cut -d';' -f1)
-    echo "Submitted job $JOB: $MODEL_ID (${WEIGHTS_GB} GB weights) on $GPUS GPU(s), config snapshot $CONFIG"
+    echo "Submitted job $JOB ($code): $MODEL_ID (${WEIGHTS_GB} GB weights) on $GPUS GPU(s), config snapshot $CONFIG"
     cat <<EOF
 
   squeue -u \$USER                     # status

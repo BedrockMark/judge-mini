@@ -625,9 +625,17 @@ def test_run_codes_name_runs_and_get_zips_only_the_result_files(tmp_path, capsys
     assert len(code_a) == 4 and code_a != code_b
     assert main(["plot", *base, "--run", code_a, "--run", code_b]) == 0  # codes work as --run
     code_m = code_of(capsys.readouterr().out)
-    assert main(["run", *base, "--out-dir", str(tmp_path / "p"), "--part-of", "zzzz"]) == 0  # a part: no own code
+    assert set(pd.read_csv(results / registry.lookup(results, code_a)["folder"] / "summary.csv")["code"]) == {code_a}
+    assert set(pd.read_csv(results / registry.lookup(results, code_m)["folder"] / "summary.csv")["code"]) == {code_m}
+    assert main(["newcode", *base]) == 0
+    code_j = capsys.readouterr().out.strip()  # drawn by a job script at submission, registered when the job runs
+    assert len(code_j) == 4 and registry.lookup(results, code_j) is None
+    assert main(["run", *base, "--out-dir", str(tmp_path / "j"), "--code", code_j]) == 0
+    assert code_of(capsys.readouterr().out) == code_j
+    assert main(["run", *base, "--out-dir", str(tmp_path / "p"), "--code", code_a]) == 0  # already registered: a part
     assert "Run code:" not in capsys.readouterr().out
-    assert [r["code"] for r in registry.load(results)] == [code_a, code_b, code_m]
+    assert set(pd.read_csv(tmp_path / "p" / "summary.csv")["code"]) == {code_a}
+    assert [r["code"] for r in registry.load(results)] == [code_a, code_b, code_m, code_j]
 
     assert main(["get", code_m.upper(), *base]) == 0
     with zipfile.ZipFile(results / "exports" / f"{code_m}.zip") as z:
@@ -775,9 +783,11 @@ def test_no_flop_plots_without_flop_data(tmp_path):
 
 # --- compare ------------------------------------------------------------------------------------
 
-def _summary_dir(path: Path, group: str, efforts: list, cost: bool = True, flops: bool = False) -> Path:
+def _summary_dir(path: Path, group: str, efforts: list, cost: bool = True, flops: bool = False,
+                 code: str | None = "k7m2") -> Path:
     path.mkdir(parents=True)
     rows = [{"judge": f"{group} ({e})", "group": group, "model": "m", "effort": e, "bias": "position",
+             **({"code": code} if code else {}),
              "metric": "robustness", "value": 0.8, "cr": 0.9, "n": 3, "n_invalid": 0, "extra": "{}",
              **({"correctness": 0.5 + 0.1 * i, "calls": 3, "out_tokens": 100.0 * (i + 1),
                  "flops": 1e12 * (i + 1) if flops else math.nan} if cost else {})}
@@ -797,12 +807,17 @@ def test_compare_tiers_align_bottom_and_repeat_highest(tmp_path):
         [("A (on)", True), ("B (high)", False)]]
 
 
-def test_compare_names_shared_groups_by_folder_and_skips_missing_data(tmp_path, capsys):
+def test_compare_names_shared_groups_by_run_code_and_skips_missing_data(tmp_path, capsys):
     from judgebias.__main__ import main
     from judgebias.compare import load_runs
-    a = _summary_dir(tmp_path / "r1", "G", ["low"], flops=True)
-    b = _summary_dir(tmp_path / "r2", "G", ["low", "high"], cost=False)
-    assert set(load_runs([a, b])["judge"]) == {"G [r1] (low)", "G [r2] (low)", "G [r2] (high)"}
+    a = _summary_dir(tmp_path / "r1", "G", ["low"], flops=True, code="2e45")  # read as text, not as a number
+    b = _summary_dir(tmp_path / "r2", "G", ["low", "high"], cost=False, code="b3cd")
+    assert set(load_runs([a, b])["judge"]) == {"G [2e45] (low)", "G [b3cd] (low)", "G [b3cd] (high)"}
+    assert set(load_runs([a, b, a])["model"]) == {"G [2e45#1]", "G [b3cd]", "G [2e45#3]"}  # one run given twice
+    old = _summary_dir(tmp_path / "old", "G", ["low"], code=None)  # written before run codes were recorded
+    assert set(load_runs([old, _summary_dir(tmp_path / "h", "H", ["low"])])["model"]) == {"G", "H"}  # unique: fine
+    with pytest.raises(ValueError, match="old.*no run code"):
+        load_runs([a, old])
     path = tmp_path / "config.yaml"
     import yaml
     path.write_text(yaml.safe_dump({"dataset_dir": str(DATASET), "env_file": None, "results_dir": str(tmp_path),
@@ -838,13 +853,13 @@ def test_compare_reads_split_folders_and_export_zips(tmp_path, caplog):
     assert (read_source(split)["value"] == 0.8).all()
     assert [str(p) for p in summary_paths(split / "merged")] == ["summary.csv"]
 
-    run = _summary_dir(tmp_path / "plain", "H", ["low"])
-    export = tmp_path / "k7m2.zip"  # `get` export: one wrapping <code>/ folder, no folder entries
+    run = _summary_dir(tmp_path / "plain", "H", ["low"], code="h2jk")
+    export = tmp_path / "h2jk.zip"  # `get` export: one wrapping <code>/ folder, no folder entries
     with zipfile.ZipFile(export, "w") as z:
-        z.write(run / "summary.csv", "k7m2/summary.csv")
-        z.writestr("k7m2/config.yaml", "x: 1\n")
-    df = load_runs([export, split / "merged", split])  # merged/ is named after its split folder
-    assert set(df["source"]) == {"k7m2", "Split-k7m2 gpt-oss-20b_1106_1200#2", "Split-k7m2 gpt-oss-20b_1106_1200#3"}
+        z.write(run / "summary.csv", "h2jk/summary.csv")
+        z.writestr("h2jk/config.yaml", "x: 1\n")
+    df = load_runs([export, _summary_dir(tmp_path / "other", "H", ["low"], code="m3np"), split])
+    assert set(df["model"]) == {"H [h2jk]", "H [m3np]", "G"}
 
     (tmp_path / "empty" / "examples").mkdir(parents=True)  # e.g. only examples/ was downloaded
     with pytest.raises(FileNotFoundError, match="No summary.csv"):

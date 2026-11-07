@@ -1,4 +1,4 @@
-"""CLI: python -m judgebias {check,run,plot,compare,runs,get,snapshot} --config config.yaml"""
+"""CLI: python -m judgebias {check,run,plot,compare,runs,get,snapshot,newcode} --config config.yaml"""
 from __future__ import annotations
 
 import argparse
@@ -27,14 +27,16 @@ def main(argv: list[str] | None = None) -> int:
                         ("compare", "compare finished runs side by side (no model calls) into a new folder"),
                         ("runs", "list run codes"),
                         ("get", "zip just the result files of the run with this code, for download"),
-                        ("snapshot", "copy the config with absolute paths into a new run folder (or dest), for a job that reads it later")]:
+                        ("snapshot", "copy the config with absolute paths into a new run folder (or dest), for a job that reads it later"),
+                        ("newcode", "print an unused run code (job scripts name the job after it, then pass it as --code)")]:
         sp = sub.add_parser(name, help=help_)
         sp.add_argument("--config", default="config.yaml")
         sp.add_argument("--log-dir", help="directory for the log file (default: <results_dir>/logs)")
         if name in ("run", "plot", "compare", "snapshot"):
             sp.add_argument("--out-dir", help="write here (must be new or empty) instead of results_dir/<timestamp>")
         if name in ("run", "plot"):
-            sp.add_argument("--part-of", metavar="CODE", help=argparse.SUPPRESS)  # vllm_split.sh: no code of its own
+            # Chosen by a job script (see newcode); registered now unless it already is, e.g. a vllm_split.sh code.
+            sp.add_argument("--code", help=argparse.SUPPRESS)
         if name == "snapshot":
             sp.add_argument("dest", nargs="?", help="write here instead of <out-dir>/config.yaml (e.g. for a check job)")
         if name == "get":
@@ -72,6 +74,9 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.cmd == "runs":
             return _list_runs(cfg)
+        if args.cmd == "newcode":
+            print(registry.new_code(cfg.results_dir))
+            return 0
         if args.cmd == "get":
             dest = registry.export(cfg.results_dir, args.code, Path(args.dest) if args.dest else None)
             print(f"Wrote {dest} ({dest.stat().st_size / 1e6:.1f} MB)")
@@ -101,14 +106,14 @@ def main(argv: list[str] | None = None) -> int:
         if args.cmd == "run":
             out_dir = _out_dir(cfg, args)
             logging.info("output folder: %s", out_dir)
-            _register(cfg, args, out_dir, f"models={','.join(sorted({j.model for j in cfg.judges}))} "
-                                          f"judges={','.join(args.judge or ['all'])} biases={','.join(args.bias or ['all'])}")
-            summary = asyncio.run(run(cfg, out_dir, args.judge, args.bias))
+            code = _register(cfg, args, out_dir, f"models={','.join(sorted({j.model for j in cfg.judges}))} "
+                                                 f"judges={','.join(args.judge or ['all'])} biases={','.join(args.bias or ['all'])}")
+            summary = asyncio.run(run(cfg, out_dir, args.judge, args.bias, code))
         else:
             sources = _sources(cfg, args.run, args.allow_missing) if args.run else [latest_output_dir(cfg)]
             summary = merge_summaries(sources)
             out_dir = _out_dir(cfg, args)
-            _register(cfg, args, out_dir, "merged " + " ".join(d.name for d in sources))
+            summary["code"] = _register(cfg, args, out_dir, "merged " + " ".join(d.name for d in sources))
             summary.to_csv(out_dir / "summary.csv", index=False)
             merge_details(sources, out_dir)
             (out_dir / "sources.txt").write_text("".join(f"{d}\n" for d in sources), encoding="utf-8")
@@ -133,18 +138,21 @@ def _out_dir(cfg, args) -> Path:
     return given_output_dir(Path(args.out_dir)) if args.out_dir else new_output_dir(cfg)
 
 
-def _register(cfg, args, out_dir: Path, note: str) -> None:
+def _register(cfg, args, out_dir: Path, note: str) -> str:
+    """This result's run code: --code (registered here unless it already is, e.g. a vllm_split.sh job's) or a new one."""
     dest = out_dir / "config.yaml"  # the exact config this result came from; a job script may have put it there
     if not (dest.exists() and dest.samefile(args.config)):
         snapshot_config(args.config, dest)
-    if args.part_of:
-        logging.info("part of run code %s", args.part_of)
-        return
+    code = args.code.strip().lower() if args.code else None
+    if code and registry.lookup(cfg.results_dir, code):
+        logging.info("part of run code %s", code)
+        return code
     job = os.environ.get("SLURM_JOB_ID")
     note = f"config={Path(config_origin(args.config)).name} {note}" + (f" job={job}" if job else "")
-    code = registry.register(cfg.results_dir, out_dir, args.cmd, note)
+    code = registry.register(cfg.results_dir, out_dir, args.cmd, note, code=code)
     logging.info("run code: %s  (python -m judgebias get %s)", code, code)
     print(f"Run code: {code}", flush=True)  # stdout too: job.sh sends the log records to the .err file
+    return code
 
 
 def _list_runs(cfg) -> int:

@@ -4,7 +4,8 @@ A source is a folder or a zip (e.g. from `python -m judgebias get`) holding one 
 single wrapping subfolder, or a vllm_split.sh folder's merged/ and/or part<i>/ summaries (merged in that order, a later
 one winning on the same judge x bias, so a part rerun after the merge counts and a missing merge is not needed).
 
-Each (folder, group) is one model. In the two bar grids, bars are clustered by effort tier: a model's efforts, sorted
+Each (folder, group) is one model; a group in several folders is told apart by the run code their summary.csv records
+(so older summaries, without one, work only if no other folder has their groups). In the two bar grids, bars are clustered by effort tier: a model's efforts, sorted
 low to high, fill tiers 1, 2, ... from the bottom, and a model with fewer efforts repeats its highest one in the upper
 tiers (hatched bars). E.g. A {none, high} and B {low, medium, high} give tiers [A none, B low], [A high, B medium],
 [A high (repeat), B high]. The cost grids (output tokens, and FLOPs for vLLM-served judges) overlay every model's judges in one scatter per bias."""
@@ -56,13 +57,13 @@ def _listing(src: Path) -> tuple[set[PurePosixPath], callable]:
 
         def read(rel):
             with zipfile.ZipFile(src) as z, z.open(str(rel)) as f:
-                return pd.read_csv(f)
+                return pd.read_csv(f, dtype={"code": str})  # a code like "2e45" must stay text
     else:
         names = {PurePosixPath(p.relative_to(src).as_posix()) for p in src.rglob("*")
                  if len(p.relative_to(src).parts) <= MAX_DEPTH}
 
         def read(rel):
-            return pd.read_csv(src / rel)
+            return pd.read_csv(src / rel, dtype={"code": str})
     return {n for n in names if len(n.parts) <= MAX_DEPTH}, read
 
 
@@ -100,28 +101,31 @@ def read_source(src: Path) -> pd.DataFrame:
     return df.drop_duplicates(["judge", "bias"], keep="last").reset_index(drop=True)
 
 
-def _source_name(src: Path) -> str:
-    name = src.stem if src.is_file() else src.name
-    name = src.parent.name if name == "merged" else name
-    return re.sub(r"^\[(Split-\w+)\]", r"\1 ", name)  # "[Split-k7m2]x" -> "Split-k7m2 x", shown inside [...]
-
-
 def load_runs(sources: list[Path]) -> pd.DataFrame:
-    """All summaries in one frame. `model` = the group, suffixed with " [<source>]" when two sources share a group;
-    `judge` = "<model> (<effort>)", unique across sources."""
-    names = [_source_name(d) for d in sources]
+    """All summaries in one frame. `model` = the group, suffixed with " [<run code>]" when two sources share a group
+    (" [<run code>#<i>]" if the same run is the i-th source and another one too); `judge` = "<model> (<effort>)",
+    unique across sources. A shared group in a summary without run codes (written before they were recorded) is an
+    error."""
     frames = []
     for i, d in enumerate(sources):
         df = _with_cost_columns(read_source(d))
         if "flops" not in df.columns:  # summaries written before FLOPs, or without any vLLM judge
             df["flops"] = math.nan
+        if "code" not in df.columns:
+            df["code"] = None
         df["effort"] = df["effort"].map(_effort).astype(object)
         df["group"] = df.apply(_group, axis=1)
-        df["source"] = names[i] if names.count(names[i]) == 1 else f"{names[i]}#{i + 1}"
+        df["source"] = i
         frames.append(df)
     df = pd.concat(frames, ignore_index=True)
-    shared = df.groupby("group")["source"].nunique()
-    df["model"] = [g if shared[g] == 1 else f"{g} [{s}]" for g, s in zip(df["group"], df["source"])]
+    shared = df.groupby("group")["source"].transform("nunique") > 1
+    if old := sorted({str(sources[i]) for i in df.loc[shared & df["code"].isna(), "source"]}):
+        raise ValueError(f"Not supported by compare: {', '.join(old)} {'has' if len(old) == 1 else 'have'} no run code "
+                         f"in summary.csv (written before run codes were recorded there), which is needed to tell apart "
+                         f"the groups several runs share: {sorted(set(df.loc[shared, 'group']))}")
+    reused = df.groupby(["group", "code"])["source"].transform("nunique") > 1  # the same run given twice
+    df["model"] = [f"{g} [{c}#{s + 1}]" if r else f"{g} [{c}]" if sh else g
+                   for g, c, s, sh, r in zip(df["group"], df["code"], df["source"], shared, reused)]
     df["judge"] = [m if e is None else f"{m} ({e})" for m, e in zip(df["model"], df["effort"])]
     return df.drop_duplicates(["judge", "bias"], keep="last").reset_index(drop=True)
 

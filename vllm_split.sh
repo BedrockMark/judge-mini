@@ -23,6 +23,7 @@
 #   config.yaml (snapshot of CONFIG at submission: every part, the merge and --resume use it, so CONFIG can be
 #   edited and another split submitted right away) and split.vars (what --resume needs). The split's run code is printed at the end and listed by
 #   `python -m judgebias runs`; once merged, `python -m judgebias get <code>` zips merged/'s result files.
+# Jobs are named after the run code: <code>_<model> for the parts, <code>_merge for the merge.
 # The merge runs even if a part failed (without it); `--resume <code>` then reruns just that part and re-merges.
 
 set -euo pipefail
@@ -117,7 +118,7 @@ for i in "${!GROUPS_[@]}"; do
     args=()
     for b in "${biases[@]}"; do args+=(--bias "$b"); done
     echo "== part$n: ${biases[*]}"
-    submitted=$(bash vllm_job.sh "$MODEL_ID" "${args[@]}" --out-dir "$part" --part-of "$CODE" "${EXTRA[@]}" | tee /dev/stderr)
+    submitted=$(bash vllm_job.sh "$MODEL_ID" "${args[@]}" --out-dir "$part" --code "$CODE" "${EXTRA[@]}" | tee /dev/stderr)
     job=$(sed -n 's/^Submitted job \([0-9]*\).*/\1/p' <<< "$submitted")
     [[ -n $job ]] || { echo "Could not read the job ID of part$n; not submitting the merge." >&2; save; exit 1; }
     JOBS[i]=$job DEPS+=("$job")
@@ -134,9 +135,9 @@ if [[ -n $MERGE_JOB ]]; then  # resuming: the earlier merge is stale (or would s
     rm -rf "$OUT/merged"
 fi
 # afterany: merge whatever parts finished, even if one failed or timed out.
-MERGE_JOB=$(sbatch --parsable ${email:+"--mail-user=$email"} --job-name="jb_merge_${MODEL_ID##*/}" ${DEPS[@]:+--dependency="afterany:$(IFS=:; echo "${DEPS[*]}")"} \
+MERGE_JOB=$(sbatch --parsable ${email:+"--mail-user=$email"} --job-name="${CODE}_merge" ${DEPS[@]:+--dependency="afterany:$(IFS=:; echo "${DEPS[*]}")"} \
     --time=00:30:00 --cpus-per-task=1 --mem=4G \
-    job.sh plot --config "$CONFIG" --allow-missing "${RUNS[@]}" --out-dir "$OUT/merged" --part-of "$CODE" | cut -d';' -f1)
+    job.sh plot --config "$CONFIG" --allow-missing "${RUNS[@]}" --out-dir "$OUT/merged" --code "$CODE" | cut -d';' -f1)
 save
 
 if (( ${#TIMED_OUT[@]} )) && [[ -z $GIVEN_JOB_TIME ]]; then

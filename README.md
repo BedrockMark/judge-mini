@@ -39,7 +39,9 @@ uv run pytest                                           # tests (no API calls)
   Figures: `bias_grid.png` and `correctness_grid.png` cluster the bars by effort tier, and
   `cost_vs_performance.png` / `cost_vs_correctness.png` (and their `_flops` versions, for judges with FLOPs) overlay
   all judges. Each (folder, group) is one model (named
-  `group [folder]` when two folders share a group). Tiers are bottom-aligned: each model's efforts, low to high, fill
+  `group [run code]` when two folders share a group; the code comes from the `code` column of `summary.csv`, so an
+  older summary without it can only be compared when no other folder has its groups — otherwise compare stops with
+  an error naming it). Tiers are bottom-aligned: each model's efforts, low to high, fill
   T1, T2, … and a model with fewer efforts repeats its highest one upward (hatched). E.g. A `off/on` with B
   `low/medium/high` gives T1 = A off, B low; T2 = A on, B medium; T3 = A on (repeated), B high. A model whose
   summary lacks the needed columns (older runs) is left out of that figure.
@@ -142,7 +144,10 @@ submission, then run with `--out-dir` that folder, so the config a queued job re
 Each `run` / `plot` (and each `vllm_split.sh` job) gets a 4-character run code, printed as `Run code: k7m2` and
 recorded in `<results_dir>/runs.tsv`. `python -m judgebias runs` lists the codes (done / pending);
 `python -m judgebias get <code>` zips only that run's result files (summary, figures, `examples.zip`, `config.yaml`,
-logs) into `<results_dir>/exports/<code>.zip` for download; `plot --run <code>` also accepts a code.
+logs) into `<results_dir>/exports/<code>.zip` for download; `plot --run <code>` also accepts a code. The code is
+also stored in `summary.csv` (`code` column). The job scripts draw it at submission and name the Slurm job after it:
+`job.sh` → `<code>_run` / `<code>_plot`, `vllm_job.sh` and `vllm_split.sh`'s parts → `<code>_<model>` (e.g.
+`k7m2_gpt-oss-20b`), the split's merge → `<code>_merge`.
 Nothing is reused between runs: every `run` calls the APIs afresh. Within one run, responses are cached by
 (provider, model, effort, params, prompt, repeat) in `results/<YYYYmmdd_HHMMSS>/cache/` so identical calls are made
 once; that cache is deleted when the run finishes (or fails).

@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=judgebias
+#SBATCH --job-name=judgebias           # run / plot: replaced by <run code>_<command> at submission
 #SBATCH --output=./job_log/%j.out       # stdout (job_log/ must exist before sbatch)
 #SBATCH --error=./job_log/%j.err        # stderr
 #SBATCH --ntasks=1
@@ -17,7 +17,8 @@
 #   SBATCH_ARGS="--time=08:00:00" bash job.sh       # extra sbatch options
 # For run / plot (and the default check + run) the snapshot is the run's own results/<timestamp>/config.yaml (folder
 # created now, filled when the job runs; --out-dir picks it instead) and is kept there with the results; other
-# commands snapshot to job_log/config/.
+# commands snapshot to job_log/config/. A run / plot job is named <run code>_run / _plot (e.g. k7m2_run): the code is
+# drawn now (or given with --code) and is the one the result is registered under when the job runs.
 # `sbatch job.sh ...` also works, but then the job reads the config file only when it starts.
 # Env must be prepared once on the login node with `uv sync` (compute nodes may lack internet).
 
@@ -29,9 +30,11 @@ if [[ -z ${SLURM_JOB_ID:-} ]]; then
     mkdir -p job_log
     # Notification address: EMAIL=... in .env, passed to sbatch as --mail-user.
     email=$(sed -n 's/^EMAIL=//p' .env 2>/dev/null | tr -d "\r\"'" | tail -1) || true
-    args=("$@") config=config.yaml at= out_dir=() out=
+    args=("$@") config=config.yaml at= out_dir=() out= code= given_code= name=()
     for i in "${!args[@]}"; do
         case ${args[i]} in
+            --code) code=${args[i + 1]:?--code needs a run code} ;;
+            --code=*) code=${args[i]#--code=} ;;
             --config) at=$((i + 1)); config=${args[at]:?--config needs a file} ;;
             --config=*) at=$i; config=${args[i]#--config=} ;;
             --out-dir) out_dir=(--out-dir "${args[i + 1]:?--out-dir needs a folder}") ;;
@@ -41,12 +44,15 @@ if [[ -z ${SLURM_JOB_ID:-} ]]; then
     if (( ${#args[@]} == 0 )) || [[ ${args[0]} == run || ${args[0]} == plot ]]; then
         snap=$(.venv/bin/python -m judgebias snapshot --config "$config" "${out_dir[@]}")  # <out folder>/config.yaml
         out=$(dirname "$snap")
+        given_code=$code   # given: passed on as is; drawn: appended to the job's args below
+        code=${code:-$(.venv/bin/python -m judgebias newcode --config "$config")}
+        name=(--job-name="${code}_${args[0]:-run}")
     else
         snap=$(.venv/bin/python -m judgebias snapshot --config "$config" \
             "job_log/config/$(date +%Y%m%d_%H%M%S)_$$_$(basename "$config")")
     fi
     if (( ${#args[@]} == 0 )); then
-        export CONFIG=$snap OUT_DIR=$out          # default check + run below
+        export CONFIG=$snap OUT_DIR=$out CODE=$code   # default check + run below
     else
         if [[ -n $at ]]; then
             args[at]=$([[ ${args[at]} == --config=* ]] && echo "--config=$snap" || echo "$snap")
@@ -54,10 +60,11 @@ if [[ -z ${SLURM_JOB_ID:-} ]]; then
             args+=(--config "$snap")
         fi
         if [[ -n $out ]] && (( ${#out_dir[@]} == 0 )); then args+=(--out-dir "$out"); fi
+        if [[ -n $out && -z $given_code ]]; then args+=(--code "$code"); fi
     fi
     # shellcheck disable=SC2086  # SBATCH_ARGS is intentionally word-split
-    sbatch ${email:+"--mail-user=$email"} ${SBATCH_ARGS:-} job.sh "${args[@]}"
-    echo "config snapshot: $snap"
+    sbatch ${email:+"--mail-user=$email"} "${name[@]}" ${SBATCH_ARGS:-} job.sh "${args[@]}"
+    echo "config snapshot: $snap${code:+  run code: $code}"
     exit 0
 fi
 
@@ -78,7 +85,7 @@ if [[ $# -gt 0 ]]; then
 else
     # Fail fast (bad key / model ID / endpoint unreachable) before the long run.
     python -m judgebias check --config "${CONFIG:-config.yaml}"
-    python -m judgebias run --config "${CONFIG:-config.yaml}" ${OUT_DIR:+--out-dir "$OUT_DIR"}
+    python -m judgebias run --config "${CONFIG:-config.yaml}" ${OUT_DIR:+--out-dir "$OUT_DIR"} ${CODE:+--code "$CODE"}
 fi
 
 echo "end=$(date '+%F %T')"
