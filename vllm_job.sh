@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=judgebias_vllm
+#SBATCH --job-name=jb_vllm
 #SBATCH --output=./job_log/%j.out
 #SBATCH --error=./job_log/%j.err
 #SBATCH --ntasks=1
@@ -19,8 +19,11 @@
 # cache); every further group of TP GPUs runs an independent replica, and the client load-balances over them.
 #
 # Env overrides (login node): CONFIG (config.vllm.yaml), GPUS (auto), GPU_TYPE (any), GPU_MEM_GB (48, for the
-#   auto GPU count), JOB_TIME (24:00:00), CPUS (8/GPU), MEM (32G + 32G/GPU), TP (auto), MAX_MODEL_LEN (32768),
-#   MAX_NUM_SEQS (256 per replica), VLLM_EXTRA_ARGS, READY_TIMEOUT (1800 s), VLLM_VENV (.venv-vllm).
+#   auto GPU count), JOB_TIME (TIME_FACTOR x GPUS^2 hours, max 24; TIME_FACTOR 3, vllm_split.sh 1 per part),
+#   CPUS (4/GPU), MEM (16G + 16G/GPU), TP (auto), MAX_MODEL_LEN (32768), MAX_NUM_SEQS (256 per replica),
+#   VLLM_EXTRA_ARGS, READY_TIMEOUT (1800 s), VLLM_VENV (.venv-vllm).
+# Measured (gpt-oss-20b, 1 GPU, one vllm_split.sh part ~1/3 of the full run): 20 min wall, <1 core busy on
+# average (8 only help the startup JIT compile), 18 GB peak RAM. A full single job is ~3 parts, hence factor 3.
 # The job runs with a snapshot of CONFIG taken at submission, so CONFIG can be edited and resubmitted for another
 # test while this one is still queued. The snapshot is the run's results/<timestamp>/config.yaml (folder created at
 # submission, or the --out-dir given) and is kept there with the results.
@@ -92,8 +95,9 @@ d(sys.argv[1], local_dir=sys.argv[2], ignore_patterns=["original/*", "metal/*"])
         while (( WEIGHTS_GB > GPUS * ${GPU_MEM_GB:-48} * 7 / 10 )); do GPUS=$((GPUS * 2)); done
     fi
 
-    JOB=$(sbatch --parsable --gres="gpu:${GPU_TYPE:+$GPU_TYPE:}$GPUS" --cpus-per-task="${CPUS:-$((8 * GPUS))}" \
-        --mem="${MEM:-$((32 + 32 * GPUS))G}" --time="${JOB_TIME:-24:00:00}" \
+    HOURS=$(( ${TIME_FACTOR:-3} * GPUS * GPUS < 24 ? ${TIME_FACTOR:-3} * GPUS * GPUS : 24 ))
+    JOB=$(sbatch --parsable --job-name="jb_vllm_${MODEL_ID##*/}" --gres="gpu:${GPU_TYPE:+$GPU_TYPE:}$GPUS" --cpus-per-task="${CPUS:-$((4 * GPUS))}" \
+        --mem="${MEM:-$((16 + 16 * GPUS))G}" --time="${JOB_TIME:-$HOURS:00:00}" \
         --export="ALL,VLLM_JOB_STAGE=run,MODEL_ID=$MODEL_ID,CONFIG=$CONFIG,VLLM_VENV=$VLLM_VENV" \
         vllm_job.sh "$@" | cut -d';' -f1)
     echo "Submitted job $JOB: $MODEL_ID (${WEIGHTS_GB} GB weights) on $GPUS GPU(s), config snapshot $CONFIG"
