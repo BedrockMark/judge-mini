@@ -19,11 +19,14 @@
 # cache); every further group of TP GPUs runs an independent replica, and the client load-balances over them.
 #
 # Env overrides (login node): CONFIG (config.vllm.yaml), GPUS (auto), GPU_TYPE (any), GPU_MEM_GB (48, for the
-#   auto GPU count), JOB_TIME (TIME_FACTOR x GPUS^2 hours, max 24; TIME_FACTOR 3, vllm_split.sh 1 per part),
-#   CPUS (4/GPU), MEM (16G + 16G/GPU), TP (auto), MAX_MODEL_LEN (32768), MAX_NUM_SEQS (256 per replica),
-#   VLLM_EXTRA_ARGS, READY_TIMEOUT (1800 s), VLLM_VENV (.venv-vllm).
-# Measured (gpt-oss-20b, 1 GPU, one vllm_split.sh part ~1/3 of the full run): 20 min wall, <1 core busy on
-# average (8 only help the startup JIT compile), 18 GB peak RAM. A full single job is ~3 parts, hence factor 3.
+#   auto GPU count), JOB_TIME (auto, see below), TIME_FACTOR (3 parts = full run; vllm_split.sh 1),
+#   SEC_PER_SAMPLE (4), CPUS (2 + 2/GPU), MEM (auto, see below), TP (auto), MAX_MODEL_LEN (32768),
+#   MAX_NUM_SEQS (256 per replica), VLLM_EXTRA_ARGS, READY_TIMEOUT (1800 s), VLLM_VENV (.venv-vllm).
+# Default time = (10 min + SEC_PER_SAMPLE x samples_per_bias x judges of the model x TIME_FACTOR / replicas) x 1.25,
+# rounded up to 15 min; default RAM = (weights + 8 GB/replica) x 1.25. Measured per vllm_split.sh part (~1/3 run):
+#   gpt-oss-20b,  1 GPU, 150 samples x 3 judges: ~30 min wall;  300 samples: 51 min, 0.5 core busy, 18 GB RAM
+#   gpt-oss-120b, 2 GPUs (TP=2), 150 x 3: 32 min wall (~4 min startup), 3 cores busy, 70 GB RAM
+# i.e. ~3-3.7 s per sample per judge; extra cores only help the startup JIT compile.
 # The job runs with a snapshot of CONFIG taken at submission, so CONFIG can be edited and resubmitted for another
 # test while this one is still queued. The snapshot is the run's results/<timestamp>/config.yaml (folder created at
 # submission, or the --out-dir given) and is kept there with the results.
@@ -104,12 +107,32 @@ d(sys.argv[1], local_dir=sys.argv[2], ignore_patterns=["original/*", "metal/*"])
         while (( WEIGHTS_GB > GPUS * ${GPU_MEM_GB:-48} * 7 / 10 )); do GPUS=$((GPUS * 2)); done
     fi
 
-    HOURS=$(( ${TIME_FACTOR:-3} * GPUS * GPUS < 24 ? ${TIME_FACTOR:-3} * GPUS * GPUS : 24 ))
-    JOB=$(sbatch --parsable ${email:+"--mail-user=$email"} --job-name="${code}_${MODEL_ID##*/}" --gres="gpu:${GPU_TYPE:+$GPU_TYPE:}$GPUS" --cpus-per-task="${CPUS:-$((4 * GPUS))}" \
-        --mem="${MEM:-$((16 + 16 * GPUS))G}" --time="${JOB_TIME:-$HOURS:00:00}" \
+    # Replicas the job will run: same TP rule as inside the job, with GPU_MEM_GB as the GPU size.
+    tp=${TP:-1}
+    if [[ -z ${TP:-} ]]; then
+        while (( tp < GPUS && WEIGHTS_GB > tp * ${GPU_MEM_GB:-48} * 7 / 10 )); do tp=$((tp * 2)); done
+    fi
+    REPLICAS=$(( GPUS / tp > 0 ? GPUS / tp : 1 ))
+    # Time: 10 min startup + SEC_PER_SAMPLE per sample per judge of this model per part, shared by the replicas,
+    # x TIME_FACTOR parts, +25%, rounded up to 15 min, max 24 h.
+    read -r SAMPLES NJUDGES <<< "$(.venv/bin/python - "$CONFIG" "$MODEL_ID" <<'EOF'
+import sys
+from judgebias.config import load_config
+cfg = load_config(sys.argv[1])
+print(cfg.samples_per_bias, max(1, sum(j.model == sys.argv[2] for j in cfg.judges)))
+EOF
+)"
+    MINUTES=$(( (600 + ${SEC_PER_SAMPLE:-4} * SAMPLES * NJUDGES * ${TIME_FACTOR:-3} / REPLICAS) * 5 / 4 / 60 ))
+    MINUTES=$(( (MINUTES + 14) / 15 * 15 ))
+    (( MINUTES <= 1440 )) || MINUTES=1440
+    # RAM: the weights (read through the page cache, which counts against --mem) + 8 GB per replica, +25%.
+    MEM_GB=$(( ((WEIGHTS_GB + 8 * REPLICAS) * 5 / 4 + 3) / 4 * 4 ))
+    JOB=$(sbatch --parsable ${email:+"--mail-user=$email"} --job-name="${code}_${MODEL_ID##*/}" --gres="gpu:${GPU_TYPE:+$GPU_TYPE:}$GPUS" --cpus-per-task="${CPUS:-$((2 + 2 * GPUS))}" \
+        --mem="${MEM:-${MEM_GB}G}" --time="${JOB_TIME:-$((MINUTES / 60)):$(printf %02d $((MINUTES % 60))):00}" \
         --export="ALL,VLLM_JOB_STAGE=run,MODEL_ID=$MODEL_ID,CONFIG=$CONFIG,VLLM_VENV=$VLLM_VENV" \
         vllm_job.sh "$@" | cut -d';' -f1)
     echo "Submitted job $JOB ($code): $MODEL_ID (${WEIGHTS_GB} GB weights) on $GPUS GPU(s), config snapshot $CONFIG"
+    echo "  time ${JOB_TIME:-$((MINUTES / 60)):$(printf %02d $((MINUTES % 60))):00}, ${CPUS:-$((2 + 2 * GPUS))} CPUs, ${MEM:-${MEM_GB}G} RAM ($SAMPLES samples x $NJUDGES judges, $REPLICAS replica(s))"
     cat <<EOF
 
   squeue -u \$USER                     # status

@@ -17,7 +17,7 @@
 # than one job and need about the same output tokens each. Every part runs all of the model's judges, which
 # self_enhancement needs (judges score each other).
 #
-# Env overrides: PARTS (groups separated by ';', biases by ','), JOB_TIME (per part; default GPUS^2 hours, max 24: TIME_FACTOR=1), CONFIG
+# Env overrides: PARTS (groups separated by ';', biases by ','), JOB_TIME (per part; default from samples x judges, see vllm_job.sh: TIME_FACTOR=1), CONFIG
 #   (config.vllm.yaml), plus everything vllm_job.sh reads.
 # Output: <results_dir>/[Split-<code>]<model>_<mmdd_HHMM>/part<i>/ per job (<model>: MODEL_ID after the last /), merged/ (full result, like a single run),
 #   config.yaml (snapshot of CONFIG at submission: every part, the merge and --resume use it, so CONFIG can be
@@ -31,7 +31,7 @@ cd "$(dirname "$0")"
 # Notification address: EMAIL=... in .env, passed to the merge job's sbatch as --mail-user (vllm_job.sh does the same for the parts).
 email=$(sed -n 's/^EMAIL=//p' .env 2>/dev/null | tr -d "\r\"'" | tail -1) || true
 # vllm_job.sh settings a resume reuses unless they are set again.
-SAVED_ENV=(JOB_TIME TIME_FACTOR GPUS GPU_TYPE GPU_MEM_GB CPUS MEM TP MAX_MODEL_LEN MAX_NUM_SEQS VLLM_EXTRA_ARGS READY_TIMEOUT VLLM_VENV)
+SAVED_ENV=(JOB_TIME TIME_FACTOR SEC_PER_SAMPLE GPUS GPU_TYPE GPU_MEM_GB CPUS MEM TP MAX_MODEL_LEN MAX_NUM_SEQS VLLM_EXTRA_ARGS READY_TIMEOUT VLLM_VENV)
 GIVEN_JOB_TIME=${JOB_TIME:-}
 JOBS=() MERGE_JOB=
 
@@ -57,7 +57,7 @@ else
     PARTS=${PARTS:-position,compassion_fade,bandwagon,distraction,diversity;authority,sentiment;verbosity,fallacy_oversight,cot,refinement_aware,self_enhancement}
     EXTRA=("$@")
 fi
-export CONFIG TIME_FACTOR=${TIME_FACTOR:-1}   # a part is ~1/3 of a full run: GPUS^2 hours, not vllm_job.sh's 3x
+export CONFIG TIME_FACTOR=${TIME_FACTOR:-1}   # a part is ~1/3 of a full run, not vllm_job.sh's 3x
 IFS=';' read -ra GROUPS_ <<< "$PARTS"
 
 # Fail before submitting anything if a bias is misspelled or one the config selects is in no group.
@@ -141,7 +141,7 @@ MERGE_JOB=$(sbatch --parsable ${email:+"--mail-user=$email"} --job-name="${CODE}
 save
 
 if (( ${#TIMED_OUT[@]} )) && [[ -z $GIVEN_JOB_TIME ]]; then
-    echo "WARNING: ${TIMED_OUT[*]} timed out and is rerun with the same time limit (${JOB_TIME:-$TIME_FACTOR x GPUS^2 hours, max 24}); to give it more," \
+    echo "WARNING: ${TIMED_OUT[*]} timed out and is rerun with the same time limit (${JOB_TIME:-the vllm_job.sh estimate}); to give it more," \
          "scancel it and run: JOB_TIME=<longer> bash vllm_split.sh --resume $CODE" >&2
 fi
 cat <<EOF
