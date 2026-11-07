@@ -25,10 +25,16 @@ def load(results_dir: Path) -> list[dict]:
         return list(csv.DictReader(f, delimiter="\t"))
 
 
-def register(results_dir: Path, folder: Path, kind: str, note: str = "") -> str:
-    """Append a new entry and return its code. folder is stored relative to results_dir when it lies inside it."""
+def new_code(results_dir: Path) -> str:
+    """A random code not yet in the registry."""
     taken = {r["code"] for r in load(results_dir)}
-    code = next(c for c in iter(lambda: "".join(secrets.choice(ALPHABET) for _ in range(4)), None) if c not in taken)
+    return next(c for c in iter(lambda: "".join(secrets.choice(ALPHABET) for _ in range(4)), None) if c not in taken)
+
+
+def register(results_dir: Path, folder: Path, kind: str, note: str = "", code: str | None = None) -> str:
+    """Append a new entry and return its code (new_code() unless given, e.g. when the folder name contains it).
+    folder is stored relative to results_dir when it lies inside it."""
+    code = code or new_code(results_dir)
     try:
         folder = folder.resolve().relative_to(results_dir.resolve())
     except ValueError:

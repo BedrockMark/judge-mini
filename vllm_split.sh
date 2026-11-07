@@ -19,7 +19,7 @@
 #
 # Env overrides: PARTS (groups separated by ';', biases by ','), JOB_TIME (per part; default GPUS^2 hours, max 24: TIME_FACTOR=1), CONFIG
 #   (config.vllm.yaml), plus everything vllm_job.sh reads.
-# Output: <results_dir>/split_<timestamp>_<model>/part<i>/ per job, merged/ (full result, like a single run),
+# Output: <results_dir>/[Split-<code>]<model>_<mmdd_HHMM>/part<i>/ per job (<model>: MODEL_ID after the last /), merged/ (full result, like a single run),
 #   config.yaml (snapshot of CONFIG at submission: every part, the merge and --resume use it, so CONFIG can be
 #   edited and another split submitted right away) and split.vars (what --resume needs). The split's run code is printed at the end and listed by
 #   `python -m judgebias runs`; once merged, `python -m judgebias get <code>` zips merged/'s result files.
@@ -74,10 +74,14 @@ print(cfg.results_dir)
 EOF
 )
 if [[ -z ${CODE:-} ]]; then
-    OUT=$RESULTS_DIR/split_$(date +%Y%m%d_%H%M%S)_${MODEL_ID//\//__}
+    STAMP=$(date +%m%d_%H%M)
     CODE=$(.venv/bin/python -c 'import sys; from pathlib import Path; from judgebias import registry
-print(registry.register(Path(sys.argv[1]), Path(sys.argv[2]), "split", sys.argv[3]))' \
-        "$RESULTS_DIR" "$OUT" "config=$(basename "$CONFIG") model=$MODEL_ID parts=$PARTS${EXTRA[*]:+ args=${EXTRA[*]}}")
+results_dir = Path(sys.argv[1]); code = registry.new_code(results_dir)
+folder = Path(sys.argv[2].replace("{code}", code))
+print(registry.register(results_dir, folder, "split", sys.argv[3], code=code))' \
+        "$RESULTS_DIR" "$RESULTS_DIR/[Split-{code}]${MODEL_ID##*/}_$STAMP" \
+        "config=$(basename "$CONFIG") model=$MODEL_ID parts=$PARTS${EXTRA[*]:+ args=${EXTRA[*]}}")
+    OUT=$RESULTS_DIR/[Split-$CODE]${MODEL_ID##*/}_$STAMP
     CONFIG=$(.venv/bin/python -m judgebias snapshot --config "$CONFIG" "$OUT/config.yaml")
 fi
 
