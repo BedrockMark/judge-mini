@@ -1,5 +1,6 @@
 import asyncio
 import math
+import os
 import shutil
 import zipfile
 from pathlib import Path
@@ -462,6 +463,46 @@ def test_split_parts_merge_into_one_complete_folder(tmp_path):
         assert {n.split("/")[1] for n in z.namelist() if n.count("/") > 1} == {"position", "cot", "self_enhancement"}
         assert "examples/self_enhancement/a_high/correct.md" in z.namelist()
 
+    # vllm_split.sh's merge (--finish-split, into the split folder): with a part missing it writes nothing ...
+    shutil.rmtree(merged)
+    (split / "split.vars").write_text("CODE=x\n", encoding="utf-8")
+    before = sorted(split.rglob("*"))
+    finish = ["plot", *base, *parts, "--finish-split", "--out-dir", str(split), "--part-jobs", "77,78"]
+    with pytest.raises(FileNotFoundError):
+        main(finish)
+    assert sorted(split.rglob("*")) == before
+    # ... nor when two parts share a judge x bias (merging would drop one of them)
+    shutil.copytree(split / "part2", split / "part3")
+    with pytest.raises(ValueError, match="share judge x bias"):
+        main(finish)
+    assert not (split / "summary.csv").exists()
+    # ... once every part finished: the result goes into the split folder, the parts' logs into logs.zip
+    shutil.rmtree(split / "part3")
+    assert main(["run", *base, "--bias", "authority", "--out-dir", str(split / "part3")]) == 0
+    jobs = tmp_path / "job_log"
+    jobs.mkdir()
+    for name in ("77.out", "77.err", "77_vllm0.log", "78.out", "770.out"):
+        (jobs / name).write_text(name, encoding="utf-8")
+    cwd = Path.cwd()
+    os.chdir(tmp_path)
+    try:
+        assert main(finish) == 0
+    finally:
+        os.chdir(cwd)
+    assert [p for p in split.iterdir() if p.is_dir()] == []
+    assert {"summary.csv", "bias_grid.png", "examples.zip", "config.yaml", "sources.txt", "split.vars", "logs.zip"} <= {
+        p.name for p in split.iterdir()}
+    assert sorted(set(pd.read_csv(split / "summary.csv")["bias"])) == ["authority", "cot", "position", "self_enhancement"]
+    with zipfile.ZipFile(split / "logs.zip") as z:
+        names = z.namelist()
+    assert sorted(n for n in names if n.startswith("job_log/")) == [
+        "job_log/77.err", "job_log/77.out", "job_log/77_vllm0.log", "job_log/78.out"]
+    assert {n.split("/")[0] for n in names if n.endswith(".log") and "/run_" in n} == {"part1", "part2", "part3"}
+    (log,) = split.glob("plot_*.log")
+    assert "logs.zip" in log.read_text(encoding="utf-8")
+    with pytest.raises(FileNotFoundError):  # the parts are gone; a second merge has nothing to read
+        main(finish)
+
 
 def test_empty_dataset_folder_gives_submodule_hint(tmp_path):
     from judgebias.config import require_dataset
@@ -654,6 +695,13 @@ def test_run_codes_name_runs_and_get_zips_only_the_result_files(tmp_path, capsys
     assert f"{code_s}" in listed and "pending" in listed and f"{code_a}" in listed
     shutil.copytree(results / registry.lookup(results, code_m)["folder"], split / "merged")
     assert main(["get", code_s, *base]) == 0
+    shutil.rmtree(split)  # every part merged: the result sits in the split folder itself
+    shutil.copytree(results / registry.lookup(results, code_m)["folder"], split)
+    (split / "split.vars").write_text("CODE=x\n", encoding="utf-8")
+    assert registry.result_dir(results, registry.lookup(results, code_s)) == split
+    assert main(["get", code_s, *base]) == 0
+    with zipfile.ZipFile(results / "exports" / f"{code_s}.zip") as z:
+        assert f"{code_s}/summary.csv" in z.namelist() and f"{code_s}/split.vars" not in z.namelist()
     with pytest.raises(FileNotFoundError, match="No run with code"):
         main(["get", "nope", *base])
 

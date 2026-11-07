@@ -56,16 +56,22 @@ def lookup(results_dir: Path, code: str) -> dict | None:
     return next((r for r in load(results_dir) if r["code"] == code.strip().lower()), None)
 
 
-def result_dir(results_dir: Path, entry: dict) -> Path:
-    """The folder holding the finished result: a split job's merged/, otherwise the registered folder itself."""
+def run_folder(results_dir: Path, entry: dict) -> Path:
+    """The registered folder (for a split job, the one holding its parts / result)."""
     folder = Path(entry["folder"])
-    folder = folder if folder.is_absolute() else results_dir / folder
-    return folder / "merged" if entry["kind"] == "split" else folder
+    return folder if folder.is_absolute() else results_dir / folder
+
+
+def result_dir(results_dir: Path, entry: dict) -> Path:
+    """The folder holding the finished result: the registered folder itself, except a split job's merged/ until every
+    part is merged (the merge then moves the result up into the split folder and deletes merged/ and the parts)."""
+    folder = run_folder(results_dir, entry)
+    return folder / "merged" if entry["kind"] == "split" and not (folder / "summary.csv").exists() else folder
 
 
 def export(results_dir: Path, code: str, dest: Path | None = None) -> Path:
     """Zip only the files a run's result needs (summary, figures, examples.zip, config.yaml, logs) into one archive:
-    no subfolders (e.g. an older run's unzipped raw/ or examples/), no split parts, no cache."""
+    no subfolders (e.g. an older run's unzipped raw/ or examples/), no split parts or split.vars, no cache."""
     entry = lookup(results_dir, code)
     if entry is None:
         raise FileNotFoundError(f"No run with code '{code}' in {registry_path(results_dir)}")
@@ -82,6 +88,6 @@ def export(results_dir: Path, code: str, dest: Path | None = None) -> Path:
     dest.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED) as z:
         for f in sorted(folder.iterdir()):
-            if f.is_file():
+            if f.is_file() and f.name != "split.vars":
                 z.write(f, f"{entry['code']}/{f.name}")
     return dest

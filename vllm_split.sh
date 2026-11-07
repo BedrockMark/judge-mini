@@ -19,12 +19,16 @@
 #
 # Env overrides: PARTS (groups separated by ';', biases by ','), JOB_TIME (per part; default from samples x judges, see vllm_job.sh), CONFIG
 #   (config.vllm.yaml), plus everything vllm_job.sh reads.
-# Output: <results_dir>/[Split-<code>]<model>_<mmdd_HHMM>/part<i>/ per job (<model>: MODEL_ID after the last /), merged/ (full result, like a single run),
+# Output: <results_dir>/[Split-<code>]<model>_<mmdd_HHMM>/ (<model>: MODEL_ID after the last /) with part<i>/ per job,
 #   config.yaml (snapshot of CONFIG at submission: every part, the merge and --resume use it, so CONFIG can be
-#   edited and another split submitted right away) and split.vars (what --resume needs). The split's run code is printed at the end and listed by
-#   `python -m judgebias runs`; once merged, `python -m judgebias get <code>` zips merged/'s result files.
+#   edited and another split submitted right away) and split.vars (what --resume needs). Once every part finished,
+#   the merge writes the full result (like a single run) into the split folder itself, zips each part's logs (its
+#   run log and job_log/<jobid>.out / .err / _vllm<i>.log) into logs.zip and deletes the part folders.
+#   The split's run code is printed at the end and listed by `python -m judgebias runs`; once merged,
+#   `python -m judgebias get <code>` zips the result files.
 # Jobs are named after the run code: <code>_<model> for the parts, <code>_merge for the merge.
-# The merge runs even if a part failed (without it); `--resume <code>` then reruns just that part and re-merges.
+# If a part failed, the merge fails without writing anything (its mail says so) and the finished parts stay;
+# `--resume <code>` then reruns just the failed part and merges again.
 # Mail (EMAIL in .env): each part when it starts and if it fails, the merge when it ends -> 4 mails for a clean run.
 
 set -euo pipefail
@@ -34,7 +38,7 @@ email=$(sed -n 's/^EMAIL=//p' .env 2>/dev/null | tr -d "\r\"'" | tail -1) || tru
 # vllm_job.sh settings a resume reuses unless they are set again.
 SAVED_ENV=(JOB_TIME SEC_PER_SAMPLE GPUS GPU_TYPE GPU_MEM_GB CPUS MEM TP MAX_MODEL_LEN MAX_NUM_SEQS VLLM_EXTRA_ARGS READY_TIMEOUT VLLM_VENV)
 GIVEN_JOB_TIME=${JOB_TIME:-}
-JOBS=() MERGE_JOB=
+JOBS=() ALL_JOBS=() MERGE_JOB=   # ALL_JOBS: every part job ever submitted (incl. failed attempts), for logs.zip
 
 if [[ ${1:-} == --resume ]]; then
     CODE=${2:?usage: bash vllm_split.sh --resume <run code>}
@@ -50,7 +54,12 @@ print(registry.result_dir(results_dir, entry).parent)
 EOF
 )
     [[ -f $OUT/split.vars ]] || { echo "$OUT/split.vars not found; cannot resume." >&2; exit 1; }
-    source "$OUT/split.vars"   # MODEL_ID CONFIG PARTS EXTRA JOBS MERGE_JOB CODE, + earlier env unless set now
+    source "$OUT/split.vars"   # MODEL_ID CONFIG PARTS EXTRA JOBS ALL_JOBS MERGE_JOB CODE, + earlier env unless set now
+    (( ${#ALL_JOBS[@]} )) || ALL_JOBS=("${JOBS[@]}")   # split.vars written before ALL_JOBS existed
+    if [[ -f $OUT/summary.csv ]]; then  # merged (every part finished)
+        echo "All parts are done and merged; nothing to rerun. Results: $OUT/"
+        exit 0
+    fi
 else
     MODEL_ID=${1:-openai/gpt-oss-20b}
     shift $(( $# > 0 ? 1 : 0 ))
@@ -88,7 +97,7 @@ fi
 
 save() {  # everything --resume needs; rewritten after every submission so job IDs are never lost
     {
-        declare -p MODEL_ID CONFIG PARTS CODE EXTRA JOBS MERGE_JOB   # sourced at top level, so these are globals
+        declare -p MODEL_ID CONFIG PARTS CODE EXTRA JOBS ALL_JOBS MERGE_JOB   # sourced at top level, so these are globals
         for v in "${SAVED_ENV[@]}"; do
             if [[ -n ${!v:-} ]]; then printf '[[ -n ${%s:-} ]] || export %s=%q\n' "$v" "$v" "${!v}"; fi
         done
@@ -122,23 +131,18 @@ for i in "${!GROUPS_[@]}"; do
     submitted=$(bash vllm_job.sh "$MODEL_ID" "${args[@]}" --out-dir "$part" --code "$CODE" "${EXTRA[@]}" | tee /dev/stderr)
     job=$(sed -n 's/^Submitted job \([0-9]*\).*/\1/p' <<< "$submitted")
     [[ -n $job ]] || { echo "Could not read the job ID of part$n; not submitting the merge." >&2; save; exit 1; }
-    JOBS[i]=$job DEPS+=("$job")
+    JOBS[i]=$job DEPS+=("$job") ALL_JOBS+=("$job")
     save
 done
 
-if [[ -n $MERGE_JOB ]]; then  # resuming: the earlier merge is stale (or would start before the reruns end)
-    if (( ${#DEPS[@]} == 0 )) && [[ -f $OUT/merged/sources.txt ]] \
-        && (( $(wc -l < "$OUT/merged/sources.txt") == ${#GROUPS_[@]} )); then
-        echo "All parts are done and merged; nothing to rerun. Results: $OUT/merged/"
-        exit 0
-    fi
+if [[ -n $MERGE_JOB ]]; then  # resuming: the earlier merge failed (a part was missing) or would start too early
     scancel "$MERGE_JOB" 2>/dev/null || true
-    rm -rf "$OUT/merged"
 fi
-# afterany: merge whatever parts finished, even if one failed or timed out. Mail only when it ends (one mail, failed or not).
+# afterany: start once every part ended, however; with a part missing it fails right away, so its mail tells.
+# Mail only when it ends (one mail, failed or not).
 MERGE_JOB=$(sbatch --parsable ${email:+"--mail-user=$email"} --mail-type=end,fail --job-name="${CODE}_merge" ${DEPS[@]:+--dependency="afterany:$(IFS=:; echo "${DEPS[*]}")"} \
     --time=00:30:00 --cpus-per-task=1 --mem=4G \
-    job.sh plot --config "$CONFIG" --allow-missing "${RUNS[@]}" --out-dir "$OUT/merged" --code "$CODE" | cut -d';' -f1)
+    job.sh plot --config "$CONFIG" --finish-split "${RUNS[@]}" --out-dir "$OUT" --code "$CODE" --part-jobs "$(IFS=,; echo "${ALL_JOBS[*]}")" | cut -d';' -f1)
 save
 
 if (( ${#TIMED_OUT[@]} )) && [[ -z $GIVEN_JOB_TIME ]]; then
@@ -149,7 +153,8 @@ cat <<EOF
 
 Run code: $CODE
 Parts: ${JOBS[*]} (run side by side as GPUs free up)   merge: $MERGE_JOB (starts when all parts end)
-Results: $OUT/merged/   (job_log/$MERGE_JOB.err warns about any missing part)
+Results: $OUT/   (part folders replaced by the merged result + logs.zip; if a part failed, the merge fails and
+          job_log/$MERGE_JOB.err names it)
 
   python -m judgebias runs --config $CONFIG          # done / pending
   python -m judgebias get $CODE --config $CONFIG     # -> $RESULTS_DIR/exports/$CODE.zip

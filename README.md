@@ -35,7 +35,7 @@ uv run pytest                                           # tests (no API calls)
 - `compare RUN [RUN ...]` draws finished runs side by side into a new `results_dir/compare_<YYYYmmdd_HHMM>/` folder, without calling any model. A RUN is
   what you downloaded from the server — a folder or a zip (e.g. from `get`), as a path or a name under `results_dir` —
   or a run code. Only `summary.csv` is needed: at the top, inside one wrapping folder, or, for a `vllm_split.sh`
-  folder, its `merged/` and/or `part*/` summaries (merged in that order, later wins; missing parts are warned about).
+  folder not merged yet, its `part*/` summaries (after an older layout's `merged/` one; a later one wins; missing parts are warned about).
   Figures: `bias_grid.png` and `correctness_grid.png` cluster the bars by effort tier, and
   `cost_vs_performance.png` / `cost_vs_correctness.png` (and their `_flops` versions, for judges with FLOPs) overlay
   all judges. Each (folder, group) is one model (named

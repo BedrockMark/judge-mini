@@ -7,8 +7,11 @@ import logging
 import os
 import shutil
 import sys
+import zipfile
 from datetime import datetime
 from pathlib import Path
+
+import pandas as pd
 
 from .check import run_check
 from .compare import compare_all
@@ -53,12 +56,18 @@ def main(argv: list[str] | None = None) -> int:
         if name == "compare":
             sp.add_argument("runs", nargs="+", metavar="RUN",
                             help="downloaded run: folder or zip (path or name under results_dir; a vllm_split.sh "
-                                 "folder with merged/ and/or part*/ works too), or run code; each one's groups are models")
+                                 "folder not merged yet, with merged/ and/or part*/, works too), or run code; each one's groups are models")
         if name == "plot":
             sp.add_argument("--run", action="append",
                             help="run code, or folder (path or name under results_dir), repeatable; later wins on overlap")
             sp.add_argument("--allow-missing", action="store_true",
                             help="skip --run folders without summary.csv (e.g. a failed part of a split job)")
+            sp.add_argument("--finish-split", action="store_true",
+                            help="vllm_split.sh's merge: --out-dir is the split folder holding every --run part; "
+                                 "fails before writing anything unless each part has a summary.csv (and no two share a "
+                                 "judge x bias), then writes the result there, zips the parts' logs into logs.zip and "
+                                 "deletes the parts")
+            sp.add_argument("--part-jobs", help=argparse.SUPPRESS)  # with --finish-split: the parts' job IDs, comma-separated
     args = p.parse_args(argv)
     fmt, datefmt = "%(asctime)s %(levelname)-7s %(name)s: %(message)s", "%H:%M:%S"
     logging.basicConfig(level=logging.INFO, format=fmt, datefmt=datefmt)
@@ -112,7 +121,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             sources = _sources(cfg, args.run, args.allow_missing) if args.run else [latest_output_dir(cfg)]
             summary = merge_summaries(sources)
-            out_dir = _out_dir(cfg, args)
+            out_dir = _split_dir(args, sources) if args.finish_split else _out_dir(cfg, args)
             summary["code"] = _register(cfg, args, out_dir, "merged " + " ".join(d.name for d in sources))
             summary.to_csv(out_dir / "summary.csv", index=False)
             merge_details(sources, out_dir)
@@ -120,6 +129,8 @@ def main(argv: list[str] | None = None) -> int:
             logging.info("plotting %s -> %s", [d.name for d in sources], out_dir)
         for out in plot_all(cfg, summary, out_dir):
             print(f"Wrote {out}")
+        if getattr(args, "finish_split", False):
+            _finish_split(out_dir, sources, (args.part_jobs or "").split(","))
         return 0
     except ConfigError as e:
         logging.error("Config error: %s", e)
@@ -157,6 +168,37 @@ def _register(cfg, args, out_dir: Path, note: str) -> str:
     return code
 
 
+def _split_dir(args, parts: list[Path]) -> Path:
+    """--finish-split: the split folder to merge into, checked before anything is written (a failed merge leaves the
+    folder as it was, so vllm_split.sh --resume finds the finished parts)."""
+    if not args.out_dir or args.allow_missing or not args.run:
+        raise ConfigError("--finish-split needs --run for every part and --out-dir, and no --allow-missing")
+    split = Path(args.out_dir)
+    if strays := [str(d) for d in parts if d.resolve().parent != split.resolve()]:
+        raise ConfigError(f"--finish-split: {strays} are not part folders of {split}")
+    if (split / "summary.csv").exists():
+        raise FileExistsError(f"{split} is already merged")
+    rows = pd.concat([pd.read_csv(d / "summary.csv", usecols=["judge", "bias"]) for d in parts])
+    if rows.duplicated().any():  # merging would keep only one of them; the parts are deleted afterwards
+        raise ValueError(f"Parts share judge x bias rows, not merging: {rows[rows.duplicated()].values.tolist()}")
+    return split
+
+
+def _finish_split(split: Path, parts: list[Path], jobs: list[str]) -> None:
+    """After a --finish-split merge: every part's own logs (its run log, and the job's job_log/<id>.out / .err /
+    _vllm<i>.log) go into split/logs.zip, then the part folders are deleted; the rest of a part is in the merge."""
+    job_logs = [f for j in jobs if j for f in sorted(Path("job_log").glob(f"{j}.*")) + sorted(Path("job_log").glob(f"{j}_*.log"))]
+    with zipfile.ZipFile(split / "logs.zip", "w", zipfile.ZIP_DEFLATED) as z:
+        for d in parts:
+            for f in sorted(d.glob("*.log")):
+                z.write(f, f"{d.name}/{f.name}")
+        for f in job_logs:
+            z.write(f, f"job_log/{f.name}")
+    for d in parts:
+        shutil.rmtree(d)
+    logging.info("zipped the part logs into %s; deleted %s", split / "logs.zip", [d.name for d in parts])
+
+
 def _list_runs(cfg) -> int:
     entries = registry.load(cfg.results_dir)
     if not entries:
@@ -188,8 +230,7 @@ def _compare_source(cfg, name: str) -> Path:
         if path.exists():
             return path
     if entry := registry.lookup(cfg.results_dir, name):
-        folder = registry.result_dir(cfg.results_dir, entry)
-        return folder.parent if entry["kind"] == "split" else folder
+        return registry.run_folder(cfg.results_dir, entry)
     raise FileNotFoundError(f"No run folder, zip or run code '{name}' (also looked in {cfg.results_dir})")
 
 
