@@ -32,7 +32,7 @@ uv run pytest                                           # tests (no API calls)
 
 - `run` accepts `--judge "<label>"` and `--bias <name>` (both repeatable) to run a subset. Partial runs are merged into `summary.csv`.
 - `check --no-call` skips the live test calls.
-- `compare RUN [RUN ...]` draws finished runs side by side into a new folder, without calling any model. A RUN is
+- `compare RUN [RUN ...]` draws finished runs side by side into a new `results_dir/compare_<YYYYmmdd_HHMM>/` folder, without calling any model. A RUN is
   what you downloaded from the server — a folder or a zip (e.g. from `get`), as a path or a name under `results_dir` —
   or a run code. Only `summary.csv` is needed: at the top, inside one wrapping folder, or, for a `vllm_split.sh`
   folder, its `merged/` and/or `part*/` summaries (merged in that order, later wins; missing parts are warned about).

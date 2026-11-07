@@ -135,7 +135,9 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _out_dir(cfg, args) -> Path:
-    return given_output_dir(Path(args.out_dir)) if args.out_dir else new_output_dir(cfg)
+    if args.out_dir:
+        return given_output_dir(Path(args.out_dir))
+    return new_output_dir(cfg, "compare_%Y%m%d_%H%M") if args.cmd == "compare" else new_output_dir(cfg)
 
 
 def _register(cfg, args, out_dir: Path, note: str) -> str:

@@ -42,9 +42,10 @@ def slug(text: str) -> str:
 RUN_DIR_RE = re.compile(r"^\d{8}_\d{6}(_\d+)?$")
 
 
-def new_output_dir(cfg: Config) -> Path:
-    """A new, empty results/<YYYYmmdd_HHMMSS>[_n]/ folder; earlier outputs are never overwritten."""
-    stamp = f"{datetime.now():%Y%m%d_%H%M%S}"
+def new_output_dir(cfg: Config, name: str = "%Y%m%d_%H%M%S") -> Path:
+    """A new, empty results/<name>[_n]/ folder (name is a strftime pattern, by default YYYYmmdd_HHMMSS); earlier
+    outputs are never overwritten."""
+    stamp = datetime.now().strftime(name)
     cfg.results_dir.mkdir(parents=True, exist_ok=True)
     for n in range(1000):
         out = cfg.results_dir / (stamp if n == 0 else f"{stamp}_{n}")
