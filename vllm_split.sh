@@ -9,7 +9,8 @@
 #   bash vllm_split.sh openai/gpt-oss-20b --judge "GPT-oss-20b (low)"   # extra args go to every `judgebias run`
 #   bash vllm_split.sh --resume k7m2                     # rerun only the parts of run k7m2 that timed out / failed /
 #   JOB_TIME=12:00:00 bash vllm_split.sh --resume k7m2   #   were cancelled, then merge again (same model, args, env
-#                                                        #   as before unless overridden like here)
+#                                                        #   as before unless overridden like here); a rerun part
+#                                                        #   reuses the responses its interrupted job got (part<i>/cache/)
 #
 # The groups keep biases that send identical prompts together (within one run those are asked once):
 # the 5 alignment-set biases share their 4 unperturbed repeats, authority + sentiment and verbosity +
@@ -28,7 +29,8 @@
 #   `python -m judgebias get <code>` zips the result files.
 # Jobs are named after the run code: <code>_<model> for the parts, <code>_merge for the merge.
 # If a part failed, the merge fails without writing anything (its mail says so) and the finished parts stay;
-# `--resume <code>` then reruns just the failed part and merges again.
+# `--resume <code>` then reruns just the failed part and merges again. A rerun part keeps the interrupted job's
+# part<i>/cache/responses.jsonl (each response is written as it arrives) and makes only the calls missing from it.
 # Mail (EMAIL in .env): each part when it starts and if it fails, the merge when it ends -> 4 mails for a clean run.
 
 set -euo pipefail
@@ -123,7 +125,13 @@ for i in "${!GROUPS_[@]}"; do
         state=$(sacct -X -n -P -j "${JOBS[i]}" -o State 2>/dev/null | head -1 || true)
         echo "== part$n: job ${JOBS[i]} ended ${state:-without a result} -> resubmitting"
         [[ $state == TIMEOUT* ]] && TIMED_OUT+=("part$n")
-        rm -rf "$part"
+        # Keep the interrupted run's response cache (the rerun skips the calls it finished) and its logs (for logs.zip).
+        if [[ -d $part ]]; then
+            find "$part" -mindepth 1 -maxdepth 1 ! -name cache ! -name '*.log' -exec rm -rf {} +
+        fi
+        if [[ -s $part/cache/responses.jsonl ]]; then
+            echo "   reusing $(wc -l < "$part/cache/responses.jsonl") cached responses of the interrupted run"
+        fi
     fi
     args=()
     for b in "${biases[@]}"; do args+=(--bias "$b"); done

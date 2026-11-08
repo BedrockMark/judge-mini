@@ -945,3 +945,48 @@ def test_compare_reads_split_folders_and_export_zips(tmp_path, caplog):
         summary_paths(tmp_path / "empty")
     with pytest.raises(FileNotFoundError, match="several runs"):
         summary_paths(tmp_path)
+
+
+# --- resuming an interrupted run ------------------------------------------------------------------
+
+def test_cache_drops_record_cut_off_mid_write(tmp_path):
+    path = tmp_path / "cache.jsonl"
+    cache = ResponseCache(path)
+    cache.put("k1", "[[A]]", {})
+    cache.close()
+    with path.open("a", encoding="utf-8") as f:
+        f.write('{"key": "k2", "respo')  # job killed mid-write
+    cache = ResponseCache(path)
+    cache.put("k3", "[[B]]", {})
+    cache.close()
+    cache = ResponseCache(path)
+    assert (len(cache), cache.get("k1"), cache.get("k2"), cache.get("k3")) == (2, "[[A]]", None, "[[B]]")
+    cache.close()
+
+
+def test_failed_run_keeps_its_cache_and_a_rerun_in_the_folder_reuses_it(tmp_path, monkeypatch, caplog):
+    from judgebias import runner
+    from judgebias.runner import given_output_dir, run
+    cfg = make_cfg(tmp_path, biases=["position"])
+    out = given_output_dir(tmp_path / "part1")
+
+    def boom(*args):
+        raise RuntimeError("killed")
+    write_examples = runner.write_examples
+    monkeypatch.setattr(runner, "write_examples", boom)
+    with pytest.raises(RuntimeError):
+        asyncio.run(run(cfg, out))
+    assert (out / "cache" / "responses.jsonl").stat().st_size > 0
+    (out / "run_1.log").write_text("first attempt")
+    assert given_output_dir(out) == out  # vllm_split.sh --resume leaves cache/ and *.log in the part
+
+    monkeypatch.setattr(runner, "write_examples", write_examples)
+    with caplog.at_level("INFO"):
+        resumed = asyncio.run(run(cfg, out))
+    assert "API calls: 0," in caplog.text and not (out / "cache").exists()
+    fresh = asyncio.run(run(cfg, given_output_dir(tmp_path / "fresh")))
+    cols = ["judge", "bias", "value", "n", "samples", "n_correct", "calls"]
+    pd.testing.assert_frame_equal(resumed[cols], fresh[cols])
+
+    with pytest.raises(FileExistsError):  # results, not just a cache: not a folder to run into
+        given_output_dir(out)

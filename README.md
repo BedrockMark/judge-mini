@@ -151,7 +151,8 @@ also stored in `summary.csv` (`code` column). The job scripts draw it at submiss
 `k7m2_gpt-oss-20b`), the split's merge → `<code>_merge`.
 Nothing is reused between runs: every `run` calls the APIs afresh. Within one run, responses are cached by
 (provider, model, effort, params, prompt, repeat) in `results/<YYYYmmdd_HHMMSS>/cache/` so identical calls are made
-once; that cache is deleted when the run finishes (or fails).
+once; that cache is deleted when the run finishes. A run that fails or is killed keeps it, and the only thing that
+reuses it is `vllm_split.sh --resume`: a rerun part makes just the calls its interrupted job had not finished.
 
 `examples.zip` holds `examples/<bias>/<judge>/{correct,wrong,invalid}.md`: up to 5 example calls each (input prompt, desired
 output, actual output), under a table with that judge's correct/wrong/invalid counts for the bias:

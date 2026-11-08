@@ -1,6 +1,7 @@
 """Runs every (judge x bias) pair into a fresh results/<YYYYmmdd_HHMMSS>/ folder: summary.csv and examples.zip
 (per-call examples/<bias>/<judge>/{correct,wrong,invalid}.md; the unzipped folder is deleted once zipped). Each run starts with an empty response cache (only deduplicates calls within the run) and deletes it
-when done, so nothing is reused from earlier runs."""
+once it succeeded, so nothing is reused from earlier runs. The one exception: a run that was killed or failed keeps its
+cache in its folder, and a new run into that same folder (vllm_split.sh --resume of a part) reuses it."""
 from __future__ import annotations
 
 import asyncio
@@ -59,9 +60,10 @@ def new_output_dir(cfg: Config, name: str = "%Y%m%d_%H%M%S") -> Path:
 
 def given_output_dir(path: Path) -> Path:
     """A caller-chosen output folder (e.g. one part of a split job); it must not exist yet, be empty, or hold only the
-    config snapshot a job script put there at submission."""
+    config snapshot a job script put there at submission, or (vllm_split.sh --resume of a part) an interrupted run's
+    cache/ and logs, so the run reuses the calls that one finished."""
     path.mkdir(parents=True, exist_ok=True)
-    if any(p.name != "config.yaml" for p in path.iterdir()):
+    if any(p.name not in ("config.yaml", "cache") and p.suffix != ".log" for p in path.iterdir()):
         raise FileExistsError(f"Output folder {path} is not empty")
     return path
 
@@ -127,8 +129,10 @@ async def run(cfg: Config, out_dir: Path, judge_filter: list[str] | None = None,
     if not judges or not biases:
         raise ValueError("Nothing to run: check --judge / --bias filters")
 
-    cache_dir = out_dir / "cache"  # out_dir is new, so this cache starts empty
+    cache_dir = out_dir / "cache"  # empty unless resuming an interrupted run in this folder (given_output_dir)
     cache = ResponseCache(cache_dir / "responses.jsonl")
+    if resumed := len(cache):
+        log.info("resuming: %d responses from an interrupted run in %s are reused", resumed, cache_dir)
     clients = build_clients(cfg, keys)
     flop = flop_providers(cfg, judges)
     ctx = Context(cfg, clients, cache, flop_models={name: m for name, (m, _) in flop.items()})
@@ -158,7 +162,7 @@ async def run(cfg: Config, out_dir: Path, judge_filter: list[str] | None = None,
         rows = await asyncio.gather(*(one(j, b) for j in judges for b in biases))
     finally:
         cache.close()
-        shutil.rmtree(cache_dir, ignore_errors=True)
+    shutil.rmtree(cache_dir, ignore_errors=True)  # kept if the run failed, for a resume
     scales = {}
     for name, after in (await flop_counters()).items():
         before, spent = flops_before[name], ctx.flops_spent.get(name, 0.0)

@@ -1,6 +1,6 @@
 """Append-only JSONL response cache. Only successful responses are stored, so failures are retried next run.
 Each record also keeps the response's output and prompt token counts (missing in entries written before they were
-recorded)."""
+recorded). Every record is flushed as written, so a run killed midway leaves the calls it finished (see runner.run)."""
 from __future__ import annotations
 
 import hashlib
@@ -20,15 +20,21 @@ class ResponseCache:
         self._tokens: dict[str, int | None] = {}
         self._prompt_tokens: dict[str, int | None] = {}
         if path.exists():
-            with path.open(encoding="utf-8") as f:
-                for line in f:
-                    if line.strip():
-                        rec = json.loads(line)
-                        self._data[rec["key"]] = rec["response"]
-                        self._tokens[rec["key"]] = rec.get("output_tokens")
-                        self._prompt_tokens[rec["key"]] = rec.get("prompt_tokens")
+            raw = path.read_bytes()
+            if not raw.endswith(b"\n"):  # killed mid-write (e.g. a job's time limit): drop the partial last record
+                raw = raw[:raw.rfind(b"\n") + 1]
+                path.write_bytes(raw)
+            for line in raw.decode("utf-8").splitlines():
+                if line.strip():
+                    rec = json.loads(line)
+                    self._data[rec["key"]] = rec["response"]
+                    self._tokens[rec["key"]] = rec.get("output_tokens")
+                    self._prompt_tokens[rec["key"]] = rec.get("prompt_tokens")
         path.parent.mkdir(parents=True, exist_ok=True)
         self._fh = path.open("a", encoding="utf-8")
+
+    def __len__(self) -> int:
+        return len(self._data)
 
     def get(self, key: str) -> str | None:
         return self._data.get(key)

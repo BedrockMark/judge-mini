@@ -8,6 +8,7 @@ job_log/
 model/
 .venv-vllm/
 temp/
+.prev_docs/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
