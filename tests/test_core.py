@@ -1,4 +1,5 @@
 import asyncio
+import colorsys
 import math
 import os
 import shutil
@@ -853,6 +854,25 @@ def test_compare_tiers_align_bottom_and_repeat_highest(tmp_path):
         [("A (off)", False), ("B (low)", False)],
         [("A (on)", False), ("B (medium)", False)],
         [("A (on)", True), ("B (high)", False)]]
+
+
+def test_compare_orders_models_by_name_in_every_tier_and_colors_by_group(tmp_path):
+    from judgebias.compare import RUN_HUE_SPREAD, _colors, _models, load_runs, tiers
+    from matplotlib.colors import to_rgb
+    srcs = [_summary_dir(tmp_path / "r1", "M-120b", ["low", "high"], code="zz11"),
+            _summary_dir(tmp_path / "r2", "M-20b", ["low"]),
+            _summary_dir(tmp_path / "r3", "M-120b", ["low", "high"], code="aa22"),
+            _summary_dir(tmp_path / "r4", "A", ["low"])]
+    for order in (srcs, srcs[::-1]):  # the same order whatever the sources' order; 20b before 120b
+        models = _models(load_runs(order))
+        layers = tiers(models)
+        assert [[j.group for j, _ in t] for t in layers] == [["A", "M-20b", "M-120b [aa22]", "M-120b [zz11]"]] * 2
+    colors = _colors(models)
+    hue = lambda label: colorsys.rgb_to_hls(*to_rgb(colors[label]))[0]
+    a, b = hue("M-120b [aa22] (high)"), hue("M-120b [zz11] (high)")
+    assert colors["M-120b [aa22] (high)"] != colors["M-120b [zz11] (high)"]  # runs told apart ...
+    assert min(abs(a - b), 1 - abs(a - b)) <= 2 * RUN_HUE_SPREAD + 0.01  # (hex rounding, tint) ... within one hue family
+    assert min(abs(a - hue("M-20b (low)")), 1 - abs(a - hue("M-20b (low)"))) > 2 * RUN_HUE_SPREAD  # another group: another hue
 
 
 def test_compare_names_shared_groups_by_run_code_and_skips_missing_data(tmp_path, capsys):

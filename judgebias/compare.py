@@ -16,11 +16,13 @@ import logging
 import math
 import re
 import zipfile
+from colorsys import hls_to_rgb, rgb_to_hls
 from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 
 import pandas as pd
+from matplotlib.colors import to_hex, to_rgb
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 
@@ -35,6 +37,9 @@ EFFORT_ORDER = [None, "none", "off", "minimal", "low", "medium", "high", "on", "
 COPY_HATCH = "////"
 MAX_DEPTH = 3  # how deep below a source to look for summary.csv
 PART_RE = re.compile(r"part(\d+)")
+SIZE_RE = re.compile(r"(.*[-_ /])(\d+(?:\.\d+)?)[bB]")  # a group ending in a parameter count, e.g. "GPT-oss-20b"
+# Spread of the run variants within one group's hue: +-hue (of a full turn), and lightness from darker to lighter.
+RUN_HUE_SPREAD, RUN_LIGHT_SPREAD = 0.06, 0.32
 # The output folder a copied run / plot log names (the folder's name on the server, before it was downloaded / renamed).
 LOG_FOLDER_RE = re.compile(r"(?:output folder: |plotting .* -> )(.+?)\s*$")
 
@@ -179,24 +184,48 @@ def _rank(effort: str | None, seen: list) -> tuple[int, int]:
     return (EFFORT_ORDER.index(effort), 0) if effort in EFFORT_ORDER else (len(EFFORT_ORDER), seen.index(effort))
 
 
+def _name_key(group: str) -> tuple:
+    """Groups by name, except that a last segment like "20b" sorts by its number: GPT-oss-20b before GPT-oss-120b."""
+    m = SIZE_RE.fullmatch(group)
+    return (m[1], float(m[2])) if m else (group, -1.0)
+
+
 def _models(df: pd.DataFrame) -> dict[str, list]:
-    """{model: its judges (label, group, effort) low to high}, models in folder order; each model gets a hue and its
-    efforts are tints of it (lowest lightest), as in the single-run figures."""
+    """{model: its judges (label, kind = its group, effort) low to high}, models sorted by group (see _name_key; models
+    sharing one by their full name, i.e. by run code, so the order is fixed)."""
     models: dict[str, list] = {}
-    for model, sub in df.groupby("model", sort=False):
+    order = sorted(dict.fromkeys(zip(df["group"], df["model"])), key=lambda gm: (_name_key(gm[0]), gm[1]))
+    for kind, model in order:
+        sub = df[df["model"] == model]
         seen = list(dict.fromkeys(sub["effort"]))
         efforts = sorted(seen, key=lambda e: _rank(e, seen))
-        models[model] = [SimpleNamespace(label=model if e is None else f"{model} ({e})", group=model, effort=e)
-                         for e in efforts]
+        models[model] = [SimpleNamespace(label=model if e is None else f"{model} ({e})", group=model, kind=kind,
+                                         effort=e) for e in efforts]
     return models
 
 
+def _variant(color: str, k: int, n: int) -> str:
+    """The k-th of n variants of a hue (a group's runs): hue nudged and lightness stepped, darker to lighter."""
+    if n == 1:
+        return color
+    h, l, s = rgb_to_hls(*to_rgb(color))
+    x = k / (n - 1) - 0.5  # -0.5 .. 0.5
+    return to_hex(hls_to_rgb((h + 2 * RUN_HUE_SPREAD * x) % 1, min(max(l + RUN_LIGHT_SPREAD * x, 0.2), 0.75), s))
+
+
 def _colors(models: dict[str, list]) -> dict[str, str]:
+    """Each group (model kind) gets one hue, its runs variants of it (_variant), and each run's efforts tints of that
+    variant (lowest lightest), as in the single-run figures."""
+    kinds: dict[str, list] = {}
+    for members in models.values():
+        kinds.setdefault(members[0].kind, []).append(members)
     colors = {}
-    for i, members in enumerate(models.values()):
-        for k, j in enumerate(members):
-            share = 1.0 if len(members) == 1 else MIN_TINT + (1 - MIN_TINT) * k / (len(members) - 1)
-            colors[j.label] = _tint(PALETTE[i % len(PALETTE)], share)
+    for i, runs in enumerate(kinds.values()):
+        for r, members in enumerate(runs):
+            base = _variant(PALETTE[i % len(PALETTE)], r, len(runs))
+            for k, j in enumerate(members):
+                share = 1.0 if len(members) == 1 else MIN_TINT + (1 - MIN_TINT) * k / (len(members) - 1)
+                colors[j.label] = _tint(base, share)
     return colors
 
 
