@@ -10,6 +10,7 @@ import pandas as pd
 import pytest
 
 from judgebias.biases import BIASES
+from judgebias.biases.base import sample
 from judgebias.biases.pairwise import Variant, base_prompt, to_answer
 from judgebias.config import Config, ConfigError, load_config, parse_config, resolve_keys
 from judgebias.context import Context
@@ -350,6 +351,30 @@ def test_every_bias_yields_classified_samples(tmp_path, bias_name):
         text = (tmp_path / "ex" / f"{status}.md").read_text(encoding="utf-8")
         n = sum(s["status"] == status for s in res.samples)
         assert f"Showing {min(n, 2)} of {n} {status} examples." in text
+        if any(s["status"] == status and s["output"] for s in res.samples):
+            assert "### Model thinking" in text and "Fake thinking" in text
+
+
+def test_thinking_reaches_examples_and_survives_cache_reload(tmp_path):
+    from judgebias.examples import render
+    from judgebias.llm import Completion
+
+    class _Thinking(FakeClient):
+        async def complete(self, model, prompt, effort, max_tokens, params):
+            return Completion("[[A]]", 10, reasoning=f"thought about {prompt}")
+
+    cfg = make_cfg(tmp_path)
+    for _ in range(2):  # first call hits the API, second the reloaded cache
+        cache = ResponseCache(tmp_path / "cache.jsonl")
+        ctx = Context(cfg, {"fake": _Thinking()}, cache)
+        out, orig = asyncio.run(ctx.ask(cfg.judges[0], "p")), asyncio.run(ctx.ask(cfg.judges[0], "q"))
+        cache.close()
+        assert (out, out.reasoning, orig.reasoning) == ("[[A]]", "thought about p", "thought about q")
+    s = sample(0, "correct", "p", "[[A]]", out, extra={"Unperturbed output": orig})
+    assert list(s["extra"]) == ["Unperturbed output: thinking", "Unperturbed output"]
+    text = render(cfg.judges[0], BIASES["position"], "correct", [s], k=1)
+    assert text.index("### Model thinking") < text.index("### Model output")
+    assert "thought about p" in text and "### Unperturbed output: thinking" in text and "thought about q" in text
 
 
 # --- rate limiting ------------------------------------------------------------------------------

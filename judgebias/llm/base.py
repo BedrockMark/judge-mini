@@ -5,16 +5,19 @@ from typing import Any
 
 
 class Completion(str):
-    """The text answer, plus the output tokens it cost (thinking included) and the prompt tokens; None when the API
-    did not say."""
+    """The text answer, plus the output tokens it cost (thinking included), the prompt tokens and the thinking text
+    the API returned separately from the answer; None when the API did not say."""
 
     output_tokens: int | None
     prompt_tokens: int | None
+    reasoning: str | None
 
-    def __new__(cls, text: str, output_tokens: int | None = None, prompt_tokens: int | None = None) -> "Completion":
+    def __new__(cls, text: str, output_tokens: int | None = None, prompt_tokens: int | None = None,
+                reasoning: str | None = None) -> "Completion":
         obj = super().__new__(cls, text)
         obj.output_tokens = output_tokens
         obj.prompt_tokens = prompt_tokens
+        obj.reasoning = reasoning or None
         return obj
 
 

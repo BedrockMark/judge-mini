@@ -28,6 +28,7 @@ class AnthropicProtocolClient(ChatClient):
             **kwargs,
         )
         tokens = resp.usage.output_tokens if resp.usage else None  # includes thinking
+        reasoning = "\n\n".join(b.thinking for b in resp.content if b.type == "thinking" and b.thinking)
         if resp.stop_reason == "refusal":
-            return Completion("", tokens)
-        return Completion("".join(b.text for b in resp.content if b.type == "text"), tokens)
+            return Completion("", tokens, reasoning=reasoning)
+        return Completion("".join(b.text for b in resp.content if b.type == "text"), tokens, reasoning=reasoning)

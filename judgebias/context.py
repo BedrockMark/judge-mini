@@ -10,7 +10,7 @@ from types import ModuleType
 from .config import Config, JudgeSpec
 from .data import load_dataset
 from .flops import FlopModel
-from .llm import ChatClient, PriorityGate, RateLimiter, ResponseCache, cache_key
+from .llm import ChatClient, Completion, PriorityGate, RateLimiter, ResponseCache, cache_key
 from .prompts import load_templates
 
 log = logging.getLogger(__name__)
@@ -70,13 +70,14 @@ class Context:
         return self.cfg.bias_options.get(bias, {})
 
     async def ask(self, judge: JudgeSpec, prompt: str, run_idx: int = 0) -> str | None:
-        """Cached completion; identical concurrent requests are deduplicated. None on failure."""
+        """Cached completion (a Completion carrying the thinking text, if any); identical concurrent requests are
+        deduplicated. None on failure."""
         key = cache_key(judge.provider, judge.model, judge.effort, judge.params, prompt, run_idx)
         hit = self.cache.get(key)
         if hit is not None:
             self.stats["cache_hits"] += 1
             self._bill(judge, key)
-            return hit
+            return Completion(hit, reasoning=self.cache.reasoning(key))
         if key not in self._inflight:
             self._inflight[key] = asyncio.ensure_future(self._call(key, judge, prompt, run_idx))
         text = await self._inflight[key]
@@ -124,11 +125,12 @@ class Context:
                     self.stats["api_calls"] += 1
                     self.cache.put(key, text, {"judge": judge.label, "model": judge.model,
                                                "effort": judge.effort, "run_idx": run_idx},
-                                   getattr(text, "output_tokens", None), getattr(text, "prompt_tokens", None))
+                                   getattr(text, "output_tokens", None), getattr(text, "prompt_tokens", None),
+                                   getattr(text, "reasoning", None))
                     flops = self._estimate_flops(judge, key)
                     if flops is not None:
                         self.flops_spent[judge.provider] = self.flops_spent.get(judge.provider, 0.0) + flops
-                    return str(text)
+                    return Completion(text, reasoning=self.cache.reasoning(key))
                 except Exception as e:  # SDKs already retry transient errors; this covers the rest
                     if getattr(e, "status_code", None) == 429 and throttled < 20:
                         # quota window is 60 s and shared by the key (other runs too): wait it out, not an attempt

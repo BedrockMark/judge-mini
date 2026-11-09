@@ -38,8 +38,10 @@ def render(judge, bias, status: str, samples: list[dict], k: int) -> str:
         if x["note"]:
             lines += ["", f"*{x['note']}*"]
         lines += ["", "### Input", "", _fence(x["input"]),
-                  "", "### Desired output", "", x["desired"],
-                  "", "### Model output", "", _fence(x["output"])]
+                  "", "### Desired output", "", x["desired"]]
+        if x.get("thinking"):
+            lines += ["", "### Model thinking", "", _fence(x["thinking"])]
+        lines += ["", "### Model output", "", _fence(x["output"])]
         for title, text in x["extra"].items():
             lines += ["", f"### {title}", "", _fence(text)]
     return "\n".join(lines) + "\n"

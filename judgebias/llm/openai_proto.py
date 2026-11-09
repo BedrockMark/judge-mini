@@ -41,4 +41,7 @@ class OpenAIProtocolClient(ChatClient):
             self._inflight[i] -= 1
         tokens = resp.usage.completion_tokens if resp.usage else None  # includes reasoning tokens
         prompt = resp.usage.prompt_tokens if resp.usage else None
-        return Completion(resp.choices[0].message.content or "", tokens, prompt)
+        msg = resp.choices[0].message
+        # vLLM returns the thinking as `reasoning_content` (`reasoning` in newer versions); OpenAI does not return it
+        reasoning = getattr(msg, "reasoning_content", None) or getattr(msg, "reasoning", None)
+        return Completion(msg.content or "", tokens, prompt, reasoning if isinstance(reasoning, str) else None)

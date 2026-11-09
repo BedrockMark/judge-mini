@@ -25,9 +25,15 @@ class BiasResult:
 
 def sample(idx, status: Literal["correct", "wrong", "invalid"], input: str, desired: str, output: str | None,
            note: str = "", extra: dict[str, str | None] | None = None) -> dict:
-    """One judged call: the prompt sent, what an unbiased judge should answer, and what it answered."""
+    """One judged call: the prompt sent, what an unbiased judge should answer, and what it answered. The thinking
+    text of `output` and of each `extra` output (when they are Completions carrying one) is kept alongside."""
+    shown: dict[str, str | None] = {}
+    for title, text in (extra or {}).items():
+        if getattr(text, "reasoning", None):
+            shown[f"{title}: thinking"] = text.reasoning
+        shown[title] = text
     return {"idx": idx, "status": status, "input": input, "desired": desired, "output": output,
-            "note": note, "extra": extra or {}}
+            "thinking": getattr(output, "reasoning", None), "note": note, "extra": shown}
 
 
 class Bias(ABC):
