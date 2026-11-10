@@ -77,8 +77,9 @@ class PerturbationBias(Bias):
                                         *(ctx.ask(judge, v.prompt) for v in variants))
             orig = [to_answer(parse_verdict(o), False) for o in outs[:repeats]]
             base = majority(orig)
+            base_out = outs[orig.index(base)] if base in orig else outs[0]  # a repeat that gave the majority verdict
             pert = [to_answer(parse_verdict(o), v.swapped) for v, o in zip(variants, outs[repeats:])]
-            samples = [self._sample(row["_idx"], v, out, base, p, outs[0], len(orig))
+            samples = [self._sample(row["_idx"], v, out, base, p, base_out, len(orig))
                        for v, out, p in zip(variants, outs[repeats:], pert)]
             return Item(orig, [(base, p) for p in pert], consistency_pairs([orig])), samples
 
@@ -109,7 +110,8 @@ class PerturbationBias(Bias):
     def _sample(self, idx, v: Variant, out: str | None, orig: str | None, pert: str | None,
                 orig_out: str | None, repeats: int = 1) -> dict:
         """Correct = the perturbed verdict picks the ground-truth answer (self.truth), whichever position it is shown in.
-        Robustness (orig vs. pert agreement) is the bias metric, computed separately in evaluate()."""
+        Robustness (orig vs. pert agreement) is the bias metric, computed separately in evaluate(). base_status grades
+        the unperturbed majority verdict, where answer 1 is always correct (also for Fallacy-Oversight)."""
         note = (f"variant: {v.name}" + (" (answers shown swapped: answer 1 is B)" if v.swapped else "")
                 + f"; unperturbed verdict (majority of {repeats}): {'unparsable' if orig is None else f'answer {orig}'}")
         letter = "A" if (self.truth == "1") != v.swapped else "B"
@@ -117,7 +119,9 @@ class PerturbationBias(Bias):
                else "the reference-preferred answer")
         desired = f"[[{letter}]] (answer {self.truth}, {why})"
         status = "invalid" if pert is None else "correct" if pert == self.truth else "wrong"
-        return sample(idx, status, v.prompt, desired, out, note, {"Unperturbed output (repeat 1)": orig_out})
+        base_status = "invalid" if orig is None else "correct" if orig == "1" else "wrong"
+        return sample(idx, status, v.prompt, desired, out, note,
+                      {"Unperturbed output (a repeat giving the majority verdict)": orig_out}, base_status)
 
 
 # --- the 9 robustness panels, in Goal.png order -------------------------------------------------

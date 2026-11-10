@@ -10,6 +10,10 @@ from .base import Bias, BiasResult, register, sample
 from .pairwise import base_prompt, to_answer
 
 
+def _status(verdict: str | None) -> str:
+    return "invalid" if verdict is None else "correct" if verdict == "1" else "wrong"
+
+
 class CoTBias(Bias):
     name, title, metric = "cot", "CoT", "accuracy"
 
@@ -27,9 +31,9 @@ class CoTBias(Bias):
             n_invalid=sum(c is None for c in cot),
             base_correctness=plain_acc,
             extra={"no_cot_accuracy": plain_acc, "cot_gain": value - plain_acc},
-            samples=[sample(r["_idx"], "invalid" if c is None else "correct" if c == "1" else "wrong", prompt,
-                            "[[A]] (answer 1 is the factually correct one)", out)
-                     for r, c, prompt, out in zip(rows, cot, cot_prompts, outs)],
+            samples=[sample(r["_idx"], _status(c), prompt, "[[A]] (answer 1 is the factually correct one)", out,
+                            extra={"Output to the plain (no-CoT) prompt": plain_out}, base_status=_status(p))
+                     for r, c, p, prompt, out, plain_out in zip(rows, cot, plain, cot_prompts, outs, outs[len(rows):])],
         )
 
 

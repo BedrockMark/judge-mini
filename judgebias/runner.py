@@ -1,6 +1,6 @@
 """Runs every (judge x bias) pair into a results folder: summary.csv and examples.zip (per-call examples
-<bias>/<judge>/{correct,wrong,invalid}.md; the unzipped folder is deleted once zipped). Each run starts with an empty
-response cache (it only deduplicates calls within the run) and deletes it once it succeeded, so nothing is reused
+<bias>/<judge>/{correct,wrong,invalid}.md, plus bias_{better,worse}_case.md for the robustness panels and CoT; the
+unzipped folder is deleted once zipped). Each run starts with an empty response cache (it only deduplicates calls within the run) and deletes it once it succeeded, so nothing is reused
 from earlier runs. The one exception: a run that was killed or failed keeps its cache in its folder, and a new run into
 that same folder (vllm_split.sh --resume of a part) reuses it."""
 from __future__ import annotations

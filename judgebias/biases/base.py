@@ -30,16 +30,21 @@ class BiasResult:
     samples: list[dict] = field(default_factory=list)  # per-call examples for results/examples, see sample()
 
 
-def sample(idx, status: Literal["correct", "wrong", "invalid"], input: str, desired: str, output: str | None,
-           note: str = "", extra: dict[str, str | None] | None = None) -> dict:
+Status = Literal["correct", "wrong", "invalid"]
+
+
+def sample(idx, status: Status, input: str, desired: str, output: str | None,
+           note: str = "", extra: dict[str, str | None] | None = None, base_status: Status | None = None) -> dict:
     """One judged call: the prompt sent, what an unbiased judge should answer, and what it answered. The thinking
-    text of `output` and of each `extra` output (when they are Completions carrying one) is kept alongside."""
+    text of `output` and of each `extra` output (when they are Completions carrying one) is kept alongside.
+    `base_status` classifies the same row under the unbiased prompt (robustness panels and CoT only; picking answer 1
+    is correct there), which examples.py pairs with `status` into the bias_better/bias_worse cases."""
     shown: dict[str, str | None] = {}
     for title, text in (extra or {}).items():
         if getattr(text, "reasoning", None):
             shown[f"{title}: thinking"] = text.reasoning
         shown[title] = text
-    return {"idx": idx, "status": status, "input": input, "desired": desired, "output": output,
+    return {"idx": idx, "status": status, "input": input, "desired": desired, "output": output, "base_status": base_status,
             "thinking": getattr(output, "reasoning", None), "note": note, "extra": shown}
 
 

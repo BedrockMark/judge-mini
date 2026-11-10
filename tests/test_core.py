@@ -385,12 +385,32 @@ def test_every_bias_yields_classified_samples(tmp_path, bias_name):
     assert res.samples and all(s["status"] in ("correct", "wrong", "invalid") for s in res.samples)
     assert all(s["input"] and s["desired"] for s in res.samples)
     write_examples(tmp_path / "ex", cfg.judges[0], BIASES[bias_name], res.samples, k=2)
+    has_base = BIASES[bias_name].metric == "robustness" or bias_name == "cot"
+    assert all((s["base_status"] is not None) == has_base for s in res.samples)
+    assert (tmp_path / "ex" / "bias_better_case.md").exists() == has_base
+    assert (tmp_path / "ex" / "bias_worse_case.md").exists() == has_base
     for status in ("correct", "wrong", "invalid"):
         text = (tmp_path / "ex" / f"{status}.md").read_text(encoding="utf-8")
         n = sum(s["status"] == status for s in res.samples)
-        assert f"Showing {min(n, 2)} of {n} {status} examples." in text
+        assert f"Showing {min(n, 2)} of {n} {status} examples " in text
         if any(s["status"] == status and s["output"] for s in res.samples):
             assert "### Model thinking" in text and "Fake thinking" in text
+
+
+def test_examples_bias_cases_and_distinct_rows(tmp_path):
+    from judgebias.examples import render
+    cfg = make_cfg(tmp_path)
+    mk = lambda idx, base, status: sample(idx, status, f"prompt {idx}", "[[A]]", "[[A]]", base_status=base)
+    xs = [mk(0, "wrong", "correct"), mk(0, "wrong", "correct"), mk(1, "wrong", "correct"),
+          mk(2, "correct", "wrong"), mk(3, "invalid", "correct"), mk(4, "correct", "invalid")]
+    better = render(cfg.judges[0], BIASES["sentiment"], "bias_better_case", xs, k=2)
+    assert "Showing 2 of 3 bias_better_case examples (from 2 distinct dataset rows; 2 available)." in better
+    assert "dataset row 0" in better and "dataset row 1" in better  # row 1 shown before the repeat of row 0
+    worse = render(cfg.judges[0], BIASES["sentiment"], "bias_worse_case", xs, k=5)
+    assert "Showing 1 of 1 bias_worse_case examples" in worse and "dataset row 2" in worse
+    assert "| Bias better case | Bias worse case |" in worse
+    # fewer distinct rows than k: repeats fill up
+    assert "Showing 3 of 3 bias_better_case" in render(cfg.judges[0], BIASES["sentiment"], "bias_better_case", xs, k=5)
 
 
 def test_thinking_reaches_examples_and_survives_cache_reload(tmp_path):

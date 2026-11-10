@@ -189,8 +189,12 @@ once; that cache is deleted when the run finishes. A run that fails or is killed
 reuses it is `vllm_split.sh --resume`: a rerun part makes just the calls its interrupted job had not finished.
 
 `examples.zip` holds `examples/<bias>/<judge>/{correct,wrong,invalid}.md`: up to 5 example calls each (input prompt, desired
-output, actual output; robustness panels also note the majority baseline verdict and show the first unperturbed
-output), under a table with that judge's correct/wrong/invalid counts for the bias:
+output, actual output; robustness panels also note the majority baseline verdict and show an unperturbed output giving
+it; CoT shows the plain-prompt output), under a table with that judge's counts for the bias. Robustness panels and CoT
+also get `bias_better_case.md` (the unbiased prompt — unperturbed / no-CoT — picked answer 2 but the biased prompt was
+correct) and `bias_worse_case.md` (unbiased prompt picked answer 1, biased prompt wrong); answer 1 is always the correct
+pick on the unbiased prompt. Each file draws its examples from distinct dataset rows (distinct unbiased prompts) first,
+repeating a row only when there are fewer than 5. Correct means:
 
 | Bias | Sample | Correct when |
 |---|---|---|
