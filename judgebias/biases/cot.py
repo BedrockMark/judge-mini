@@ -25,6 +25,7 @@ class CoTBias(Bias):
         return BiasResult(
             value=value, ci=ci, n=len(rows),
             n_invalid=sum(c is None for c in cot),
+            base_correctness=plain_acc,
             extra={"no_cot_accuracy": plain_acc, "cot_gain": value - plain_acc},
             samples=[sample(r["_idx"], "invalid" if c is None else "correct" if c == "1" else "wrong", prompt,
                             "[[A]] (answer 1 is the factually correct one)", out)

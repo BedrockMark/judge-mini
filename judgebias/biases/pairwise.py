@@ -6,7 +6,12 @@ swaps are comparable to unswapped prompts.
 
 RR (paper Sec. 3): a perturbed verdict is robust when it matches the unperturbed one, except for
 Fallacy-Oversight (paper App. C): answer 1 is made logically chaotic, so the robust verdict *changes*.
-Correctness compares the perturbed verdict to the ground truth: answer 1, or answer 2 for Fallacy-Oversight.
+The unperturbed prompt is judged `cr_repeats` times; the baseline verdict is their majority (a tie: the first), which
+is less noisy than the paper's single judgement. CR (metrics.consistency_rate) compares each repeat with the majority
+of the others, so it is what RR would be if the perturbation did nothing, and `effect` = RR - expected RR (CR, or
+1 - CR for Fallacy-Oversight) is the perturbation's own effect, with a bootstrap interval over dataset rows.
+Correctness compares the perturbed verdict to the ground truth: answer 1, or answer 2 for Fallacy-Oversight;
+base_correctness does the same for the unperturbed repeats (always answer 1).
 Drift (metrics.drift) tells a directed bias from noise: the net share of verdicts that moved toward answer 2.
 """
 from __future__ import annotations
@@ -17,7 +22,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from types import ModuleType
 
-from ..metrics import consistency_rate, drift, is_robust, proportion
+from ..metrics import bootstrap_ci, consistency_pairs, drift, expected_rr, is_robust, majority, proportion
 from ..parse import parse_verdict
 from .base import Bias, BiasResult, register, sample
 
@@ -30,6 +35,15 @@ class Variant:
 
 
 VariantFn = Callable[[dict, ModuleType, dict], list[Variant]]
+
+
+@dataclass
+class Item:
+    """One dataset row's verdicts: the unperturbed repeats, (baseline, perturbed) pairs per variant, and the
+    leave-one-out consistency pairs. The bootstrap resamples these."""
+    orig: list[str | None]
+    pairs: list[tuple[str | None, str | None]]
+    cr_pairs: list[tuple[str | None, str | None]]
 
 
 def to_answer(verdict: str | None, swapped: bool) -> str | None:
@@ -62,34 +76,48 @@ class PerturbationBias(Bias):
             outs = await asyncio.gather(*(ctx.ask(judge, orig_prompt, r) for r in range(repeats)),
                                         *(ctx.ask(judge, v.prompt) for v in variants))
             orig = [to_answer(parse_verdict(o), False) for o in outs[:repeats]]
+            base = majority(orig)
             pert = [to_answer(parse_verdict(o), v.swapped) for v, o in zip(variants, outs[repeats:])]
-            samples = [self._sample(row["_idx"], v, out, orig[0], p, outs[0])
+            samples = [self._sample(row["_idx"], v, out, base, p, outs[0], len(orig))
                        for v, out, p in zip(variants, outs[repeats:], pert)]
-            return orig, pert, samples
+            return Item(orig, [(base, p) for p in pert], consistency_pairs([orig])), samples
 
         done = await asyncio.gather(*(run_item(r) for r in ctx.data(self.dataset)))
-        pairs = [(orig[0], p) for orig, pert, _ in done for p in pert]  # RR compares each variant to repeat 0
+        items = [item for item, _ in done]
+        pairs = [pair for item in items for pair in item.pairs]
         value, ci = proportion([is_robust(o, p, self.expect_change) for o, p in pairs])
+        cr = self._cr(items)
         return BiasResult(
-            value=value, ci=ci, n=len(done),
-            cr=consistency_rate([orig for orig, _, _ in done]),
-            drift=drift(pairs),
-            n_invalid=sum(c is None for orig, pert, _ in done for c in [*orig, *pert]),
-            samples=[s for _, _, samples in done for s in samples],
+            value=value, ci=ci, n=len(items),
+            cr=cr, expected_rr=expected_rr(cr, self.expect_change),
+            effect=self._effect(items), effect_ci=bootstrap_ci(items, self._effect),
+            drift=drift(pairs), drift_ci=bootstrap_ci(items, lambda xs: drift([p for x in xs for p in x.pairs])),
+            base_correctness=proportion([c == "1" for item in items for c in item.orig])[0],
+            n_invalid=sum(c is None for item in items for c in [*item.orig, *(p for _, p in item.pairs)]),
+            samples=[s for _, samples in done for s in samples],
         )
 
+    @staticmethod
+    def _cr(items: list[Item]) -> float:
+        return proportion([is_robust(o, p) for item in items for o, p in item.cr_pairs])[0]
+
+    def _effect(self, items: list[Item]) -> float:
+        """RR - expected RR over these items (the bootstrap statistic)."""
+        rr = proportion([is_robust(o, p, self.expect_change) for item in items for o, p in item.pairs])[0]
+        return rr - expected_rr(self._cr(items), self.expect_change)
+
     def _sample(self, idx, v: Variant, out: str | None, orig: str | None, pert: str | None,
-                orig_out: str | None) -> dict:
+                orig_out: str | None, repeats: int = 1) -> dict:
         """Correct = the perturbed verdict picks the ground-truth answer (self.truth), whichever position it is shown in.
         Robustness (orig vs. pert agreement) is the bias metric, computed separately in evaluate()."""
         note = (f"variant: {v.name}" + (" (answers shown swapped: answer 1 is B)" if v.swapped else "")
-                + f"; unperturbed verdict: {'unparsable' if orig is None else f'answer {orig}'}")
+                + f"; unperturbed verdict (majority of {repeats}): {'unparsable' if orig is None else f'answer {orig}'}")
         letter = "A" if (self.truth == "1") != v.swapped else "B"
         why = ("answer 1 was made logically chaotic, so answer 2 is now better" if self.expect_change
                else "the reference-preferred answer")
         desired = f"[[{letter}]] (answer {self.truth}, {why})"
         status = "invalid" if pert is None else "correct" if pert == self.truth else "wrong"
-        return sample(idx, status, v.prompt, desired, out, note, {"Unperturbed output": orig_out})
+        return sample(idx, status, v.prompt, desired, out, note, {"Unperturbed output (repeat 1)": orig_out})
 
 
 # --- the 9 robustness panels, in Goal.png order -------------------------------------------------

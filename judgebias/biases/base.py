@@ -18,8 +18,14 @@ class BiasResult:
     n: int  # dataset rows judged
     ci: tuple[float, float] = (math.nan, math.nan)  # 95% interval of value (see metrics.py)
     n_invalid: int = 0  # verdicts / scores that could not be parsed (or calls that failed)
-    cr: float = math.nan  # consistency rate of the unperturbed prompt (robustness biases only)
-    drift: float = math.nan  # net move of verdicts from answer 1 to answer 2 (robustness biases only, metrics.drift)
+    # Robustness biases only (NaN otherwise), see biases/pairwise.py:
+    cr: float = math.nan  # consistency rate of the unperturbed prompt (metrics.consistency_rate)
+    expected_rr: float = math.nan  # the RR a perturbation with no effect would get (metrics.expected_rr)
+    effect: float = math.nan  # value - expected_rr: the perturbation's effect beyond the judge's own inconsistency
+    effect_ci: tuple[float, float] = (math.nan, math.nan)  # 95% bootstrap interval of effect
+    drift: float = math.nan  # net move of verdicts from answer 1 to answer 2 (metrics.drift)
+    drift_ci: tuple[float, float] = (math.nan, math.nan)  # 95% bootstrap interval of drift
+    base_correctness: float = math.nan  # share of unperturbed judgements picking the ground truth (CoT: plain prompt)
     extra: dict = field(default_factory=dict)
     samples: list[dict] = field(default_factory=list)  # per-call examples for results/examples, see sample()
 

@@ -63,7 +63,7 @@ Run `check` first, and start `run` with a small `samples_per_bias` (e.g. 5) as a
 | `samples_per_bias` / `seed` | Seed-fixed subset size per dataset |
 | `concurrency` | Max simultaneous API calls per model |
 | `providers.<name>.rpm` | Optional client-side cap on requests per 60 s, shared by all judges on that provider (API key) |
-| `cr_repeats` | Times the unperturbed prompt is judged, for Consistency Rate (≥ 2) |
+| `cr_repeats` | Times the unperturbed prompt is judged (≥ 2): their majority is the baseline verdict, and they give the Consistency Rate |
 | `max_tokens` | Per-response cap (thinking + answer) |
 | `log_dir` | Where log files go (default `<results_dir>/logs`); override per run with `--log-dir` |
 | `providers` | `name: {protocol: openai\|anthropic, base_url, api_key_env}`; any OpenAI-compatible endpoint works (use `token_param: max_tokens` if it needs it) |
@@ -106,15 +106,29 @@ judges:
 
 RR = share of items whose verdict (mapped back to the underlying answer) is unchanged by the perturbation;
 unparseable verdicts count as non-robust and are tallied in `n_invalid`. Fallacy-Oversight is the exception (paper
-App. C): answer 1's reasoning is made chaotic, so an item is robust when the verdict *changes*. The red dashed line is
-the mean Consistency Rate across judges for RR panels, and the mean metric across judges for the others.
+App. C): answer 1's reasoning is made chaotic, so an item is robust when the verdict *changes*.
+
+**Baseline and CR.** The unperturbed prompt is judged `cr_repeats` times and the *majority* verdict (a tie: the
+first) is the baseline RR compares against, which is less noisy than the paper's single judgement. The Consistency
+Rate compares each unperturbed repeat with the majority of the other repeats (leave-one-out), i.e. exactly what RR
+does with a perturbed verdict. So CR is the RR a perturbation with **no effect** would get, and with `cr_repeats: 2`
+it is the paper's CR (the two judgements agree). A stochastic judge flips some share of verdicts on its own, so RR
+alone understates robustness; what matters is RR relative to CR.
+
+**Effect** = RR − expected RR, where expected RR is CR (1 − CR for Fallacy-Oversight, where only a *changed* verdict
+is robust, so inconsistency alone scores 1 − CR). It is the perturbation's own effect once the judge's own
+inconsistency is taken out: ≈ 0 means the perturbation is indistinguishable from re-sampling, < 0 a bias (or, for
+Fallacy-Oversight, > 0 means the fallacy was noticed beyond chance). `effect_lo` / `effect_hi` is its 95% bootstrap
+interval over dataset rows (so RR and CR are resampled together). In `bias_grid.png` the red dash over each bar is
+that judge's expected RR; `effect_grid.png` shows the effects themselves around a zero line.
 Perturbations that target one answer always target the rejected one (answer 2), except Fallacy-Oversight and
 Sentiment (answer 1). Dataset rows missing a perturbed field are skipped, not invented.
 
 **Drift** separates a directed bias from noise, which RR alone cannot: it is the net share of items whose verdict moved
 from answer 1 to answer 2 under the perturbation (`(#1→2 − #2→1) / items`, in −1…1). A judge whose RR is 0.8 with
 drift +0.2 moved every flipped item toward answer 2 (a bias); RR 0.8 with drift 0 flipped equally in both directions
-(inconsistency, compare the CR). The sign's meaning per panel is in the table.
+(inconsistency, compare the CR). `drift_lo` / `drift_hi` is its 95% bootstrap interval. The sign's meaning per panel
+is in the table.
 
 **Confidence intervals.** `value_lo` / `value_hi` are 95% intervals (Wilson for RR, accuracy and Correctness; normal
 on the mean for error rates), drawn as error bars on every bar and marker. Items are taken as independent; panels with
@@ -175,7 +189,8 @@ once; that cache is deleted when the run finishes. A run that fails or is killed
 reuses it is `vllm_split.sh --resume`: a rerun part makes just the calls its interrupted job had not finished.
 
 `examples.zip` holds `examples/<bias>/<judge>/{correct,wrong,invalid}.md`: up to 5 example calls each (input prompt, desired
-output, actual output), under a table with that judge's correct/wrong/invalid counts for the bias:
+output, actual output; robustness panels also note the majority baseline verdict and show the first unperturbed
+output), under a table with that judge's correct/wrong/invalid counts for the bias:
 
 | Bias | Sample | Correct when |
 |---|---|---|
@@ -190,23 +205,27 @@ Invalid = a verdict/score needed for the comparison could not be parsed (or the 
 
 | File | Shows |
 |---|---|
-| `bias_grid.png` | the 3×4 grid above: one bar per judge per bias, with its 95% interval |
+| `bias_grid.png` | the 3×4 grid above: one bar per judge per bias, with its 95% interval; RR panels: a red dash over each bar at that judge's expected RR if the perturbation had no effect (CR, or 1 − CR for Fallacy-Oversight) |
+| `effect_grid.png` | RR panels only: RR − expected RR per judge with its 95% bootstrap interval, around a zero line (below zero = a bias; Fallacy-Oversight: above zero = the fallacy is noticed) |
 | `cost_vs_performance.png` | per bias: mean output tokens per call (x, log) vs. that bias's metric (y, with interval) |
-| `correctness_grid.png` | same grid, one bar per judge per bias showing Correctness; bars grouped by judge group, then effort |
+| `correctness_grid.png` | same grid, one bar per judge per bias showing Correctness; bars grouped by judge group, then effort; a red dash over each bar at that judge's Correctness on the unperturbed prompt (CoT: the plain prompt) |
 | `cost_vs_correctness.png` | per bias: mean output tokens per call (x, log) vs. Correctness (y) |
 | `utility.png` + `utility.csv` | per judge: mean output tokens per call over all its calls (x) vs. mean Correctness across biases (y; error bar = std across biases, i.e. how uneven the judge is across panels, not sampling error) |
 | `cost_vs_performance_flops.png`, `cost_vs_correctness_flops.png` | the two cost grids with mean FLOPs per call as the cost; only for judges served by `vllm_job.sh` / `vllm_split.sh` |
 
 **Correctness** = `n_correct / samples` over every judged call of that judge × bias (the correct/wrong/invalid rule
 above; invalid counts as not correct; `examples/` only shows a few of them), so every bias is on the same 0–1,
-higher-is-better scale and can be averaged. **Cost** = output tokens as reported by the API (thinking/reasoning
+higher-is-better scale and can be averaged. `base_correctness` is the same share for the unperturbed prompt (all
+`cr_repeats` judgements, against answer 1; CoT: the plain prompt's accuracy), the reference each Correctness bar is
+drawn against. **Cost** = output tokens as reported by the API (thinking/reasoning
 included), averaged per call. Every call a bias makes counts, cache hits included, so the cost does not depend on what
 was cached; Self-Enhancement scoring calls are billed to the judge that scored. In the cost plots, the marker shape
 shows the effort and a group's judges are joined by a gray line in effort order.
 
 `summary.csv` columns: `judge`, `group`, `model`, `effort`, `bias`, `metric`, `value`, `value_lo`, `value_hi`,
-`drift` (robustness panels only), `cr`, `n` (dataset rows), `n_invalid`, `samples`, `n_correct`, `n_wrong` (invalid =
-the rest), `correctness`, `calls` (calls with a known token count), `out_tokens` (mean output tokens per call),
+then robustness panels only: `cr`, `expected_rr`, `effect`, `effect_lo`, `effect_hi`, `drift`, `drift_lo`,
+`drift_hi`; `n` (dataset rows), `n_invalid`, `samples`, `n_correct`, `n_wrong` (invalid = the rest), `correctness`,
+`base_correctness` (RR and CoT panels), `calls` (calls with a known token count), `out_tokens` (mean output tokens per call),
 `flops`, `flops_scale` (below), `extra` (JSON: CoT's `no_cot_accuracy` and `cot_gain`, Self-Enhancement's `others` and
 `same_model_only`), `code`. Calls whose usage the API did not report are left out of `out_tokens` (a warning is
 logged), and a judge × bias with no known count is skipped in the cost plots.

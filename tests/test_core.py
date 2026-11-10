@@ -1,5 +1,6 @@
 import asyncio
 import colorsys
+import json
 import math
 import os
 import shutil
@@ -18,7 +19,8 @@ from judgebias.llm import ResponseCache, build_clients
 from judgebias.llm.anthropic_proto import AnthropicProtocolClient
 from judgebias.llm.fake import FakeClient
 from judgebias.llm.openai_proto import OpenAIProtocolClient
-from judgebias.metrics import accuracy, consistency_rate, drift, error_rate, mean_ci, proportion, robustness_rate, wilson
+from judgebias.metrics import (accuracy, bootstrap_ci, consistency_pairs, consistency_rate, drift, error_rate, expected_rr,
+                               majority, mean_ci, proportion, robustness_rate, wilson)
 from judgebias.runner import SUMMARY_COLUMNS
 from judgebias.parse import parse_rating, parse_verdict
 
@@ -69,7 +71,7 @@ def test_to_answer_maps_positions_back():
 
 def test_metrics():
     assert robustness_rate([("1", "1"), ("1", "2"), (None, None), ("2", "2")]) == 0.5
-    assert consistency_rate([["1", "1"], ["1", "2"], [None, None]]) == pytest.approx(1 / 3)
+    assert consistency_rate([["1", "1"], ["1", "2"], [None, None]]) == pytest.approx(1 / 3)  # 2 repeats: the paper's CR
     assert accuracy(["1", "2", None, "1"], "1") == 0.5
     assert error_rate([(8, 8), (6, 8), (None, 8)]) == pytest.approx(0.125)
     assert math.isnan(robustness_rate([]))
@@ -86,6 +88,28 @@ def test_intervals_and_drift():
     # drift: net share of verdicts moving 1 -> 2; symmetric flips cancel, invalid sides do not move
     assert drift([("1", "2"), ("1", "2"), ("2", "1"), ("1", "1"), (None, "2")]) == pytest.approx(0.2)
     assert drift([("1", "2"), ("2", "1")]) == 0 and math.isnan(drift([]))
+
+
+def test_majority_baseline_and_leave_one_out_consistency():
+    assert majority(["1", "2", "2"]) == "2" and majority(["2", None, "1", "1"]) == "1"
+    assert majority(["1", "2", None]) == "1" and majority([None, "2", "1"]) == "2"  # a tie: the first valid repeat
+    assert majority([None, None]) is None
+    # each repeat vs the majority of the others: 3 of 4 agree -> 3 pairs agree, the odd one disagrees
+    assert consistency_pairs([["1", "1", "1", "2"]]) == [("1", "1"), ("1", "1"), ("1", "1"), ("1", "2")]
+    assert consistency_rate([["1", "1", "1", "2"]]) == 0.75
+    assert consistency_rate([["1", "1", "1", "1"], ["1", "1", "2", "2"]]) == pytest.approx(0.5)  # 2-2 flips every pair
+    assert math.isnan(consistency_rate([["1"]]))  # a single repeat has no pair
+    # a perturbation with no effect scores CR; for Fallacy-Oversight (a change is robust) 1 - CR
+    assert expected_rr(0.8) == 0.8 and expected_rr(0.8, expect_change=True) == pytest.approx(0.2)
+
+
+def test_bootstrap_ci_brackets_the_statistic_and_is_reproducible():
+    items = [1] * 80 + [0] * 20
+    lo, hi = bootstrap_ci(items, lambda xs: sum(xs) / len(xs))
+    assert lo < 0.8 < hi and 0.7 < lo and hi < 0.9
+    assert bootstrap_ci(items, lambda xs: sum(xs) / len(xs)) == (lo, hi)  # seeded
+    assert all(math.isnan(v) for v in bootstrap_ci([], lambda xs: 0.0))
+    assert all(math.isnan(v) for v in bootstrap_ci([1], lambda xs: math.nan))  # NaN resamples are dropped
 
 
 # --- config & key matching ----------------------------------------------------------------------
@@ -455,7 +479,7 @@ def test_each_command_writes_a_new_timestamped_folder(tmp_path):
     first, second = runs()
     for d in (first, second):
         names = {p.name for p in d.iterdir()}
-        assert {"summary.csv", "bias_grid.png", "cost_vs_performance.png", "correctness_grid.png",
+        assert {"summary.csv", "bias_grid.png", "effect_grid.png", "cost_vs_performance.png", "correctness_grid.png",
                 "cost_vs_correctness.png", "utility.png",
                 "utility.csv", "examples.zip", "config.yaml"} <= names
         assert not names & {"raw", "raw.zip", "examples"}  # no raw output; examples/ deleted once zipped
@@ -656,7 +680,17 @@ def test_summary_counts_every_sample(tmp_path):
     assert (s["n_correct"] + s["n_wrong"] <= s["samples"]).all() and set(s["group"]) == {"G"}
     assert s.loc[("G (high)", "cot"), "out_tokens"] > s.loc[("G (low)", "cot"), "out_tokens"]
     assert ((s["value_lo"] <= s["value"]) & (s["value"] <= s["value_hi"])).all()
-    assert s["drift"].notna().equals(s["metric"] == "robustness") and (s["drift"].dropna().abs() <= 1).all()
+    robust = s["metric"] == "robustness"
+    for col in ("cr", "expected_rr", "effect", "effect_lo", "effect_hi", "drift", "drift_lo", "drift_hi"):
+        assert s[col].notna().equals(robust), col
+    r = s[robust]
+    assert (r["drift"].abs() <= 1).all() and ((r["drift_lo"] <= r["drift"]) & (r["drift"] <= r["drift_hi"])).all()
+    assert (r["expected_rr"] == r["cr"]).all()  # authority: a change is not the robust verdict
+    assert (r["effect"] == r["value"] - r["expected_rr"]).all()
+    assert ((r["effect_lo"] <= r["effect"]) & (r["effect"] <= r["effect_hi"])).all()
+    assert s["base_correctness"].notna().equals(s["metric"].isin(["robustness", "accuracy"]))
+    assert s.loc[("G (low)", "cot"), "base_correctness"] == pytest.approx(
+        json.loads(s.loc[("G (low)", "cot"), "extra"])["no_cot_accuracy"])
 
 
 def test_pairwise_correctness_is_against_the_ground_truth_not_the_unperturbed_verdict():
@@ -682,6 +716,16 @@ def test_robustness_rate_expects_a_change_for_fallacy_oversight():
     assert robustness_rate(pairs) == 1 / 5
     assert robustness_rate(pairs, expect_change=True) == 2 / 5
     assert BIASES["fallacy_oversight"].expect_change and not BIASES["position"].expect_change
+
+
+def test_fallacy_oversight_effect_is_against_one_minus_cr(tmp_path):
+    from judgebias.runner import run
+    cfg = make_cfg(tmp_path, biases=["fallacy_oversight"], cr_repeats=3)
+    out = tmp_path / "out"
+    out.mkdir()
+    s = asyncio.run(run(cfg, out)).set_index("judge")
+    assert (s["expected_rr"] == 1 - s["cr"]).all() and (s["effect"] == s["value"] - s["expected_rr"]).all()
+    assert (s["base_correctness"] >= 0).all()  # unperturbed repeats scored against answer 1, the original winner
 
 
 def test_run_codes_name_runs_and_get_zips_only_the_result_files(tmp_path, capsys):
@@ -862,7 +906,9 @@ def test_no_flop_plots_without_flop_data(tmp_path):
     out.mkdir()
     s = asyncio.run(run(cfg, out))
     assert s["flops"].isna().all()
-    assert not any("flops" in p.name for p in plot_all(cfg, s, out))
+    names = {p.name for p in plot_all(cfg, s, out)}
+    assert not any("flops" in n for n in names)
+    assert "effect_grid.png" not in names  # CoT only: no robustness panel to show an effect for
 
 
 # --- compare ------------------------------------------------------------------------------------
@@ -871,7 +917,9 @@ def _summary_dir(path: Path, group: str, efforts: list, flops: bool = False, cod
     path.mkdir(parents=True)
     rows = [{"judge": group if e is None else f"{group} ({e})", "group": group, "model": "m", "effort": e,
              "bias": "position", "code": code,
-             "metric": "robustness", "value": 0.8, "value_lo": 0.7, "value_hi": 0.9, "drift": 0.1, "cr": 0.9, "n": 3,
+             "metric": "robustness", "value": 0.8, "value_lo": 0.7, "value_hi": 0.9, "cr": 0.9, "expected_rr": 0.9,
+             "effect": -0.1, "effect_lo": -0.3, "effect_hi": 0.1, "drift": 0.1, "drift_lo": -0.1, "drift_hi": 0.3,
+             "base_correctness": 0.6, "n": 3,
              "n_invalid": 0, "samples": 3, "n_correct": 2, "n_wrong": 1, "correctness": 0.5 + 0.1 * i, "calls": 3,
              "out_tokens": 100.0 * (i + 1), "flops": 1e12 * (i + 1) if flops else math.nan, "flops_scale": math.nan,
              "extra": "{}"}
@@ -931,14 +979,20 @@ def test_compare_names_shared_groups_by_run_code_and_skips_missing_data(tmp_path
     out = tmp_path / "cmp"
     assert main(["compare", "r1", str(b), str(plain), "--config", str(path), "--log-dir", str(tmp_path / "logs"),
                  "--out-dir", str(out)]) == 0
-    assert {p.name for p in out.glob("*.png")} == {"bias_grid.png", "correctness_grid.png",
+    assert {p.name for p in out.glob("*.png")} == {"bias_grid.png", "effect_grid.png", "correctness_grid.png",
                                                   "cost_vs_performance.png", "cost_vs_correctness.png",
                                                   "cost_vs_performance_flops.png", "cost_vs_correctness_flops.png"}
     no_flops = tmp_path / "cmp2"
     assert main(["compare", str(b), "--config", str(path), "--log-dir", str(tmp_path / "logs"),
                  "--out-dir", str(no_flops)]) == 0
-    assert {p.name for p in no_flops.glob("*.png")} == {"bias_grid.png", "correctness_grid.png",
+    assert {p.name for p in no_flops.glob("*.png")} == {"bias_grid.png", "effect_grid.png", "correctness_grid.png",
                                                        "cost_vs_performance.png", "cost_vs_correctness.png"}
+    old = _summary_dir(tmp_path / "old", "O", ["low"])  # a summary from before the effect columns existed
+    pd.read_csv(old / "summary.csv").drop(columns=["effect", "effect_lo", "effect_hi"]).to_csv(old / "summary.csv",
+                                                                                              index=False)
+    assert main(["compare", str(old), "--config", str(path), "--log-dir", str(tmp_path / "logs"),
+                 "--out-dir", str(tmp_path / "cmp3")]) == 0
+    assert "effect_grid.png" not in {p.name for p in (tmp_path / "cmp3").glob("*.png")}
 
 
 def test_compare_reads_split_folders_and_export_zips(tmp_path, caplog):

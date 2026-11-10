@@ -27,17 +27,22 @@ from .llm import ResponseCache, build_clients
 
 log = logging.getLogger(__name__)
 
-# value / value_lo / value_hi = the panel's metric and its 95% interval (metrics.py); drift = net share of verdicts
-# that moved from answer 1 to answer 2 under the perturbation (robustness panels only; positive = toward answer 2).
-# n = dataset rows; samples = every judged call classified correct/wrong/invalid (examples/ shows only a few),
-# correctness = n_correct / samples. out_tokens = mean output tokens (thinking included) per call, over calls whose
+# value / value_lo / value_hi = the panel's metric and its 95% interval (metrics.py). Robustness panels only (NaN
+# otherwise): cr = consistency rate of the unperturbed prompt, expected_rr = the RR a perturbation with no effect
+# would get (cr, or 1 - cr for Fallacy-Oversight), effect = value - expected_rr with its 95% bootstrap interval
+# effect_lo / effect_hi, drift = net share of verdicts that moved from answer 1 to answer 2 under the perturbation
+# (positive = toward answer 2) with drift_lo / drift_hi. n = dataset rows; samples = every judged call classified
+# correct/wrong/invalid (examples/ shows only a few), correctness = n_correct / samples; base_correctness = the same
+# share for the unperturbed prompt (robustness panels; CoT: the plain prompt), NaN for the error-rate panels.
+# out_tokens = mean output tokens (thinking included) per call, over calls whose
 # usage the API reported (NaN if none). flops = mean FLOPs per call (judges on a `flops` provider only, else NaN):
 # the per-call estimate times flops_scale = vLLM's measured FLOPs over the run / the estimates' sum (NaN if the
 # server's counter could not be read; flops is then the bare estimate). code = the run code of the folder holding
 # this summary (a split's parts and merge: the split's code; a `plot` merge: its own).
-SUMMARY_COLUMNS = ["judge", "group", "model", "effort", "bias", "metric", "value", "value_lo", "value_hi", "drift",
-                   "cr", "n", "n_invalid", "samples", "n_correct", "n_wrong", "correctness", "calls", "out_tokens",
-                   "flops", "flops_scale", "extra", "code"]
+SUMMARY_COLUMNS = ["judge", "group", "model", "effort", "bias", "metric", "value", "value_lo", "value_hi", "cr",
+                   "expected_rr", "effect", "effect_lo", "effect_hi", "drift", "drift_lo", "drift_hi", "n",
+                   "n_invalid", "samples", "n_correct", "n_wrong", "correctness", "base_correctness", "calls",
+                   "out_tokens", "flops", "flops_scale", "extra", "code"]
 # A flops_scale outside this range means the estimate and vLLM's counter disagree by more than prefix caching
 # (scale < 1) or retries (scale > 1) explain; the FLOP figures are then not trustworthy.
 FLOPS_SCALE_RANGE = (0.5, 2.0)
@@ -153,14 +158,19 @@ async def run(cfg: Config, out_dir: Path, judge_filter: list[str] | None = None,
         res = await bias.evaluate(judge, ctx)
         write_examples(out_dir / "examples" / bias_name / slug(judge.label), judge, bias, res.samples)
         log.info("%-28s %-18s %s=%.3f [%.3f, %.3f]%s n=%d invalid=%d", judge.label, bias_name, bias.metric,
-                 res.value, *res.ci, f" cr={res.cr:.3f} drift={res.drift:+.3f}" if bias.metric == "robustness" else "",
-                 res.n, res.n_invalid)
+                 res.value, *res.ci,
+                 f" cr={res.cr:.3f} effect={res.effect:+.3f} [{res.effect_ci[0]:+.3f}, {res.effect_ci[1]:+.3f}]"
+                 f" drift={res.drift:+.3f} [{res.drift_ci[0]:+.3f}, {res.drift_ci[1]:+.3f}]"
+                 if bias.metric == "robustness" else "", res.n, res.n_invalid)
         counts = Counter(x["status"] for x in res.samples)
         return {"judge": judge.label, "group": judge.group, "model": judge.model, "effort": judge.effort,
                 "bias": bias_name, "metric": bias.metric, "value": res.value, "value_lo": res.ci[0],
-                "value_hi": res.ci[1], "drift": res.drift, "cr": res.cr, "n": res.n, "n_invalid": res.n_invalid,
+                "value_hi": res.ci[1], "cr": res.cr, "expected_rr": res.expected_rr, "effect": res.effect,
+                "effect_lo": res.effect_ci[0], "effect_hi": res.effect_ci[1], "drift": res.drift,
+                "drift_lo": res.drift_ci[0], "drift_hi": res.drift_ci[1], "n": res.n, "n_invalid": res.n_invalid,
                 "samples": len(res.samples), "n_correct": counts["correct"], "n_wrong": counts["wrong"],
                 "correctness": counts["correct"] / len(res.samples) if res.samples else math.nan,
+                "base_correctness": res.base_correctness,
                 "extra": json.dumps(res.extra), "code": code}
 
     try:

@@ -1,4 +1,4 @@
-"""Compare finished runs without calling any model: several downloaded results' summary.csv -> six figures.
+"""Compare finished runs without calling any model: several downloaded results' summary.csv -> seven figures.
 
 A source is a folder or a zip (e.g. from `python -m judgebias get`) holding one run's summary.csv: at its top, in a
 single wrapping subfolder, or a vllm_split.sh folder not merged yet, whose part<i>/ summaries are merged (a later
@@ -25,8 +25,8 @@ from matplotlib.patches import Patch
 
 from .biases import BIASES
 from .config import effort_rank
-from .plot import (MUTED, PALETTE, Y_LABEL, Judge, _cost_grid, _finish, _panel_grid, _ref_handle, _reference, _style, _ylim,
-                   effort_of, interval, tints, yerr, ERR_KW)
+from .plot import (ERR_KW, INK, MUTED, PALETTE, Y_LABEL, Judge, _cost_grid, _finish, _kind, _panel_grid, _panels, _ref_handle,
+                   _references, _style, _ylim, effort_of, interval, tints, yerr)
 from .runner import read_summary
 
 log = logging.getLogger(__name__)
@@ -165,8 +165,11 @@ def tiers(models: dict[str, list[Judge]]) -> list[list[tuple[Judge, bool]]]:
 
 
 def _with_data(df: pd.DataFrame, cols: list[str], out: Path) -> pd.DataFrame:
-    """Only models with some row where all `cols` are known (e.g. FLOPs exist for vLLM-served judges only)."""
-    known = df[cols].apply(pd.to_numeric, errors="coerce").notna().all(axis=1)
+    """Only models with some row where all `cols` are known (e.g. FLOPs exist for vLLM-served judges only; a summary
+    from before a column existed has none)."""
+    present = [c for c in cols if c in df]
+    known = df[present].apply(pd.to_numeric, errors="coerce").notna().all(axis=1) if len(present) == len(cols) else \
+        pd.Series(False, index=df.index)
     keep = set(df.loc[known, "model"])
     if not keep:
         log.warning("%s skipped: no model has %s data", out.name, "/".join(cols))
@@ -182,23 +185,29 @@ def _bar_grid(df: pd.DataFrame, out: Path, ycol: str, ncols: int) -> Path | None
     models = _models(df)
     colors, layers = _colors(models), tiers(models)
     width = 0.8 / len(models)
-    fig, panels = _panel_grid(df, ncols)
+    names = _panels(df, "robustness" if ycol == "effect" else None)
+    if not names:
+        return None
+    fig, panels = _panel_grid(names, ncols)
     for ax, name in panels:
         bias = BIASES[name]
         sub = df[df["bias"] == name].set_index("judge")
         lo, hi = interval(sub, ycol)
         pick = lambda s, j: float(s[j.label]) if j.label in sub.index else math.nan
-        values = []
+        values, placed = [], []
         for t, tier in enumerate(layers):
             for k, (j, repeat) in enumerate(tier):
-                v = pick(sub[ycol], j)
+                v, x = pick(sub[ycol], j), t - 0.4 + width * (k + 0.5)
                 values.append(v)
-                ax.bar(t - 0.4 + width * (k + 0.5), v, width=width, color=colors[j.label],
+                placed.append((x, j))
+                ax.bar(x, v, width=width, color=colors[j.label],
                        hatch=COPY_HATCH if repeat else None, edgecolor="white", linewidth=1, zorder=2,
                        yerr=yerr([v], [pick(lo, j)], [pick(hi, j)]), error_kw=ERR_KW)
-        ref = _reference(ax, sub, bias, ycol)
-        ax.set_ylim(*_ylim(bias.metric if ycol == "value" else "accuracy", values + [ref, *lo, *hi]))
-        _style(ax, bias.title, Y_LABEL[bias.metric] if ycol == "value" else "Correctness")
+        refs = _references(ax, sub, bias, ycol, placed, width / 2)
+        if ycol == "effect":
+            ax.axhline(0, color=INK, linewidth=0.8, zorder=1)
+        ax.set_ylim(*_ylim(_kind(bias, ycol), values + refs + [*lo, *hi]))
+        _style(ax, bias.title, Y_LABEL[_kind(bias, ycol)])
         ax.set_xticks(range(len(layers)), [f"T{t + 1}" for t in range(len(layers))])
         ax.set_xlabel("Effort tier (low → high)", fontsize=8, color=MUTED)
 
@@ -206,7 +215,8 @@ def _bar_grid(df: pd.DataFrame, out: Path, ycol: str, ncols: int) -> Path | None
                      label=f"{model}: {' < '.join(j.effort or 'default' for j in members)}")
                for model, members in models.items()]
     handles.append(Patch(facecolor="#c3c2b7", hatch=COPY_HATCH, edgecolor="white", label="highest effort, repeated"))
-    handles.append(_ref_handle(ycol))
+    if ref_handle := _ref_handle(ycol):
+        handles.append(ref_handle)
     return _finish(fig, handles, out, ncol=3)
 
 
@@ -222,12 +232,13 @@ def _cost(df: pd.DataFrame, out: Path, ycol: str, ncols: int, xcol: str = "out_t
 
 def compare_all(sources: list[Path], out_dir: Path, ncols: int = 4) -> list[Path]:
     """The comparison figures for these sources (folders or zips, see the module doc), plus the combined summary they
-    were drawn from: the two bar grids, the two cost grids, and the two cost grids with FLOPs as the cost (judges
+    were drawn from: the three bar grids, the two cost grids, and the two cost grids with FLOPs as the cost (judges
     served by our vLLM job). A figure no model has data for is skipped."""
     df = load_runs(sources)
     out_dir.mkdir(parents=True, exist_ok=True)
     df.to_csv(out_dir / "summary.csv", index=False)
     outs = [_bar_grid(df, out_dir / "bias_grid.png", "value", ncols),
+            _bar_grid(df, out_dir / "effect_grid.png", "effect", ncols),
             _bar_grid(df, out_dir / "correctness_grid.png", "correctness", ncols),
             _cost(df, out_dir / "cost_vs_performance.png", "value", ncols),
             _cost(df, out_dir / "cost_vs_correctness.png", "correctness", ncols),

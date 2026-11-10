@@ -7,7 +7,10 @@ interval on the mean. Items are treated as independent; a bias with several pert
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+import random
+from collections import Counter
+from collections.abc import Callable, Sequence
+from typing import TypeVar
 
 Z = 1.96  # 95%
 Choice = str | None
@@ -43,6 +46,16 @@ def mean_ci(values: Sequence[float]) -> tuple[float, tuple[float, float]]:
     return m, (max(0.0, m - half), m + half)
 
 
+def majority(choices: Sequence[Choice]) -> Choice:
+    """The verdict most of the valid repeats gave; a tie falls back to the first valid one (the paper's single
+    judgement). None when no repeat is valid."""
+    valid = [c for c in choices if c is not None]
+    if not valid:
+        return None
+    top = Counter(valid).most_common()
+    return valid[0] if len(top) > 1 and top[0][1] == top[1][1] else top[0][0]
+
+
 def is_robust(original: Choice, perturbed: Choice, expect_change: bool = False) -> bool:
     """A (original, perturbed) pair is robust when both are valid and agree; with expect_change (Fallacy-Oversight,
     paper App. C: answer 1 is made chaotic, so the right verdict moves) when they differ instead."""
@@ -64,9 +77,39 @@ def drift(pairs: Sequence[tuple[Choice, Choice]]) -> float:
     return (to_2 - to_1) / len(pairs)
 
 
+def consistency_pairs(repeats: Sequence[Sequence[Choice]]) -> list[tuple[Choice, Choice]]:
+    """Leave-one-out pairs (majority of the other repeats, held-out repeat), one per repeat of every item: each is
+    an unperturbed judgement compared with the majority baseline, exactly what RR does with a perturbed one."""
+    return [(majority([*r[:k], *r[k + 1:]]), r[k]) for r in repeats if len(r) > 1 for k in range(len(r))]
+
+
 def consistency_rate(repeats: Sequence[Sequence[Choice]]) -> float:
-    """Share of items whose repeated original judgements are all identical and valid."""
-    return proportion([r[0] is not None and all(x == r[0] for x in r) for r in repeats])[0]
+    """Share of consistency_pairs that agree (both valid): how often a fresh unperturbed judgement matches the
+    majority baseline. With 2 repeats this is the paper's CR (the two judgements agree). It is the RR a perturbation
+    with no effect would get, so RR - CR is the perturbation's effect (see expected_rr for Fallacy-Oversight)."""
+    return proportion([is_robust(o, p) for o, p in consistency_pairs(repeats)])[0]
+
+
+def expected_rr(cr: float, expect_change: bool = False) -> float:
+    """RR expected when the perturbation changes nothing: CR, or 1 - CR when the robust verdict is a *changed* one
+    (Fallacy-Oversight), since then only inconsistency makes an item count as robust."""
+    return 1 - cr if expect_change else cr
+
+
+T = TypeVar("T")
+
+
+def bootstrap_ci(items: Sequence[T], stat: Callable[[Sequence[T]], float], n_boot: int = 1000,
+                 seed: int = 0) -> tuple[float, float]:
+    """95% percentile bootstrap interval of stat(items), resampling items (dataset rows) with replacement; NaN
+    resamples (e.g. a statistic with no valid pairs) are dropped."""
+    if not items:
+        return NAN_CI
+    rng = random.Random(seed)
+    values = sorted(v for _ in range(n_boot) if not math.isnan(v := stat(rng.choices(items, k=len(items)))))
+    if not values:
+        return NAN_CI
+    return values[int(0.025 * (len(values) - 1))], values[int(0.975 * (len(values) - 1))]
 
 
 def accuracy(choices: Sequence[Choice], correct: str) -> float:
