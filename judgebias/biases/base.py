@@ -15,11 +15,12 @@ MetricKind = Literal["robustness", "accuracy", "error_rate"]
 @dataclass
 class BiasResult:
     value: float
-    n: int
-    n_invalid: int = 0
+    n: int  # dataset rows judged
+    ci: tuple[float, float] = (math.nan, math.nan)  # 95% interval of value (see metrics.py)
+    n_invalid: int = 0  # verdicts / scores that could not be parsed (or calls that failed)
     cr: float = math.nan  # consistency rate of the unperturbed prompt (robustness biases only)
+    drift: float = math.nan  # net move of verdicts from answer 1 to answer 2 (robustness biases only, metrics.drift)
     extra: dict = field(default_factory=dict)
-    records: list[dict] = field(default_factory=list)  # per-item details the metrics are computed from
     samples: list[dict] = field(default_factory=list)  # per-call examples for results/examples, see sample()
 
 

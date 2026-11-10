@@ -18,7 +18,8 @@ from judgebias.llm import ResponseCache, build_clients
 from judgebias.llm.anthropic_proto import AnthropicProtocolClient
 from judgebias.llm.fake import FakeClient
 from judgebias.llm.openai_proto import OpenAIProtocolClient
-from judgebias.metrics import accuracy, consistency_rate, error_rate, robustness_rate
+from judgebias.metrics import accuracy, consistency_rate, drift, error_rate, mean_ci, proportion, robustness_rate, wilson
+from judgebias.runner import SUMMARY_COLUMNS
 from judgebias.parse import parse_rating, parse_verdict
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -72,6 +73,19 @@ def test_metrics():
     assert accuracy(["1", "2", None, "1"], "1") == 0.5
     assert error_rate([(8, 8), (6, 8), (None, 8)]) == pytest.approx(0.125)
     assert math.isnan(robustness_rate([]))
+
+
+def test_intervals_and_drift():
+    lo, hi = wilson(90, 100)
+    assert (lo, hi) == (pytest.approx(0.825, abs=0.001), pytest.approx(0.945, abs=0.001))  # textbook Wilson, p=0.9 n=100
+    assert wilson(100, 100) == (pytest.approx(0.963, abs=0.001), pytest.approx(1.0))  # not degenerate at p=1
+    assert all(math.isnan(v) for v in wilson(0, 0))
+    assert proportion([True, False]) == (0.5, wilson(1, 2))
+    m, (a, b) = mean_ci([0.1, 0.3, 0.2])
+    assert m == pytest.approx(0.2) and a < 0.2 < b and mean_ci([0.5]) == (0.5, (0.5, 0.5))
+    # drift: net share of verdicts moving 1 -> 2; symmetric flips cancel, invalid sides do not move
+    assert drift([("1", "2"), ("1", "2"), ("2", "1"), ("1", "1"), (None, "2")]) == pytest.approx(0.2)
+    assert drift([("1", "2"), ("2", "1")]) == 0 and math.isnan(drift([]))
 
 
 # --- config & key matching ----------------------------------------------------------------------
@@ -590,25 +604,15 @@ def test_old_cache_entries_have_unknown_usage(tmp_path):
 
 def test_utility_table_weights_tokens_by_calls(tmp_path):
     from judgebias.plot import utility_table
-    cfg = make_cfg(tmp_path)
     summary = pd.DataFrame([
-        {"judge": "a", "bias": "position", "correctness": 0.5, "calls": 10, "out_tokens": 100.0},
-        {"judge": "a", "bias": "cot", "correctness": 1.0, "calls": 30, "out_tokens": 200.0},
-        {"judge": "b", "bias": "position", "correctness": 0.25, "calls": 0, "out_tokens": math.nan},
+        {"judge": "a", "group": "a", "model": "m", "effort": None, "bias": "position", "correctness": 0.5, "calls": 10, "out_tokens": 100.0},
+        {"judge": "a", "group": "a", "model": "m", "effort": None, "bias": "cot", "correctness": 1.0, "calls": 30, "out_tokens": 200.0},
+        {"judge": "b", "group": "b", "model": "m", "effort": None, "bias": "position", "correctness": 0.25, "calls": 0, "out_tokens": math.nan},
     ])
-    t = utility_table(cfg, summary).set_index("judge")
+    t = utility_table(summary).set_index("judge")
     assert t.loc["a", "mean_correctness"] == 0.75 and t.loc["a", "std_correctness"] == 0.25
     assert t.loc["a", "out_tokens"] == 175 and t.loc["a", "calls"] == 40
     assert t.loc["b", "mean_correctness"] == 0.25 and math.isnan(t.loc["b", "out_tokens"])
-
-
-def test_plot_all_handles_summaries_without_cost_columns(tmp_path):
-    from judgebias.plot import plot_all
-    cfg = make_cfg(tmp_path)
-    old = pd.DataFrame([{"judge": j, "model": "m", "effort": None, "bias": "position", "metric": "robustness",
-                         "value": 0.8, "cr": 0.9, "n": 3, "n_invalid": 0, "extra": "{}"} for j in ("a", "b")])
-    outs = plot_all(cfg, old, tmp_path)
-    assert all(p.exists() for p in outs) and (tmp_path / "utility.csv").exists()
 
 
 def test_effort_list_expands_into_one_group(tmp_path):
@@ -624,13 +628,17 @@ def test_effort_list_expands_into_one_group(tmp_path):
                                    {"label": "G (low)", "provider": "fake", "model": "m"}])
 
 
-def test_group_colors_tint_by_effort(tmp_path):
-    from judgebias.plot import PALETTE, _judges_and_colors
-    cfg = make_cfg(tmp_path, judges=[{"label": "G", "provider": "fake", "model": "m", "effort": ["high", "low"]},
-                                     {"label": "S", "provider": "fake", "model": "m"}])
-    _, colors = _judges_and_colors(cfg, pd.DataFrame({"judge": ["G (high)", "G (low)", "S"]}))
-    assert colors["G (high)"] == PALETTE[0] and colors["S"] == PALETTE[1]  # highest effort = full hue
-    assert colors["G (low)"] != PALETTE[0]
+def test_judges_come_from_the_summary_and_group_colors_tint_by_effort(tmp_path):
+    from judgebias.plot import PALETTE, colors_of, judges_of
+    cfg = make_cfg(tmp_path, judges=[{"label": "S", "provider": "fake", "model": "m", "color": "#123456"}])
+    summary = pd.DataFrame({"judge": ["G (high)", "S", "G (low)", "X"], "group": ["G", "S", "G", "X"],
+                            "model": "m", "effort": ["high", math.nan, "low", "none"]})
+    judges = judges_of(summary, cfg)
+    assert [j.label for j in judges] == ["G (low)", "G (high)", "S", "X"]  # groups as they appear, efforts ascending
+    assert [j.effort for j in judges] == ["low", "high", None, "none"]
+    colors = colors_of(judges)
+    assert colors["G (high)"] == PALETTE[0] and colors["G (low)"] != PALETTE[0]  # highest effort = full hue
+    assert colors["S"] == "#123456" and colors["X"] == PALETTE[2]  # config color wins; X is not in the config at all
 
 
 def test_summary_counts_every_sample(tmp_path):
@@ -639,12 +647,16 @@ def test_summary_counts_every_sample(tmp_path):
                    judges=[{"label": "G", "provider": "fake", "model": "m", "effort": ["low", "high"]}])
     out = tmp_path / "out"
     out.mkdir()
-    s = asyncio.run(run(cfg, out)).set_index(["judge", "bias"])
+    summary = asyncio.run(run(cfg, out))
+    assert list(summary.columns) == SUMMARY_COLUMNS
+    s = summary.set_index(["judge", "bias"])
     auth = s.loc[("G (low)", "authority")]
     assert auth["samples"] > auth["n"]  # several perturbations per dataset row, all counted
     assert (s["correctness"] == s["n_correct"] / s["samples"]).all()
     assert (s["n_correct"] + s["n_wrong"] <= s["samples"]).all() and set(s["group"]) == {"G"}
     assert s.loc[("G (high)", "cot"), "out_tokens"] > s.loc[("G (low)", "cot"), "out_tokens"]
+    assert ((s["value_lo"] <= s["value"]) & (s["value"] <= s["value_hi"])).all()
+    assert s["drift"].notna().equals(s["metric"] == "robustness") and (s["drift"].dropna().abs() <= 1).all()
 
 
 def test_pairwise_correctness_is_against_the_ground_truth_not_the_unperturbed_verdict():
@@ -710,7 +722,7 @@ def test_run_codes_name_runs_and_get_zips_only_the_result_files(tmp_path, capsys
     assert {f"{code_m}/summary.csv", f"{code_m}/bias_grid.png", f"{code_m}/examples.zip", f"{code_m}/config.yaml"} <= names
     assert not any(n.count("/") > 1 for n in names)  # top-level files only
 
-    # a split job: its code points at merged/, which is missing until the merge job ran
+    # a split job: its folder holds only part<i>/ until the merge job writes the result into it
     split = results / "split_x"
     code_s = registry.register(results, split, "split", "model=m1")
     (split / "part1").mkdir(parents=True)
@@ -719,12 +731,10 @@ def test_run_codes_name_runs_and_get_zips_only_the_result_files(tmp_path, capsys
     assert main(["runs", *base]) == 0
     listed = capsys.readouterr().out
     assert f"{code_s}" in listed and "pending" in listed and f"{code_a}" in listed
-    shutil.copytree(results / registry.lookup(results, code_m)["folder"], split / "merged")
-    assert main(["get", code_s, *base]) == 0
-    shutil.rmtree(split)  # every part merged: the result sits in the split folder itself
+    shutil.rmtree(split)
     shutil.copytree(results / registry.lookup(results, code_m)["folder"], split)
     (split / "split.vars").write_text("CODE=x\n", encoding="utf-8")
-    assert registry.result_dir(results, registry.lookup(results, code_s)) == split
+    assert registry.run_folder(results, registry.lookup(results, code_s)) == split
     assert main(["get", code_s, *base]) == 0
     with zipfile.ZipFile(results / "exports" / f"{code_s}.zip") as z:
         assert f"{code_s}/summary.csv" in z.namelist() and f"{code_s}/split.vars" not in z.namelist()
@@ -749,7 +759,7 @@ def test_config_snapshot_is_frozen_and_works_from_any_folder(tmp_path, capsys):
     orig.write_text(yaml.safe_dump({**cfg, "samples_per_bias": 99}), encoding="utf-8")  # edited after "submission"
     assert main(["run", "--config", str(snap), "--log-dir", str(tmp_path / "logs")]) == 0
     (entry,) = registry.load(tmp_path / "results")
-    out = registry.result_dir(tmp_path / "results", entry)
+    out = registry.run_folder(tmp_path / "results", entry)
     assert yaml.safe_load((out / "config.yaml").read_text(encoding="utf-8"))["samples_per_bias"] == 3
     assert entry["note"].startswith("config=config.yaml ")  # named after the original, not the snapshot file
     with pytest.raises(ConfigError):
@@ -857,16 +867,16 @@ def test_no_flop_plots_without_flop_data(tmp_path):
 
 # --- compare ------------------------------------------------------------------------------------
 
-def _summary_dir(path: Path, group: str, efforts: list, cost: bool = True, flops: bool = False,
-                 code: str | None = "k7m2") -> Path:
+def _summary_dir(path: Path, group: str, efforts: list, flops: bool = False, code: str | None = "k7m2") -> Path:
     path.mkdir(parents=True)
-    rows = [{"judge": f"{group} ({e})", "group": group, "model": "m", "effort": e, "bias": "position",
-             **({"code": code} if code else {}),
-             "metric": "robustness", "value": 0.8, "cr": 0.9, "n": 3, "n_invalid": 0, "extra": "{}",
-             **({"correctness": 0.5 + 0.1 * i, "calls": 3, "out_tokens": 100.0 * (i + 1),
-                 "flops": 1e12 * (i + 1) if flops else math.nan} if cost else {})}
+    rows = [{"judge": group if e is None else f"{group} ({e})", "group": group, "model": "m", "effort": e,
+             "bias": "position", "code": code,
+             "metric": "robustness", "value": 0.8, "value_lo": 0.7, "value_hi": 0.9, "drift": 0.1, "cr": 0.9, "n": 3,
+             "n_invalid": 0, "samples": 3, "n_correct": 2, "n_wrong": 1, "correctness": 0.5 + 0.1 * i, "calls": 3,
+             "out_tokens": 100.0 * (i + 1), "flops": 1e12 * (i + 1) if flops else math.nan, "flops_scale": math.nan,
+             "extra": "{}"}
             for i, e in enumerate(efforts)]
-    pd.DataFrame(rows).to_csv(path / "summary.csv", index=False)
+    pd.DataFrame(rows, columns=SUMMARY_COLUMNS).to_csv(path / "summary.csv", index=False)
     return path
 
 
@@ -904,39 +914,31 @@ def test_compare_names_shared_groups_by_run_code_and_skips_missing_data(tmp_path
     from judgebias.__main__ import main
     from judgebias.compare import load_runs
     a = _summary_dir(tmp_path / "r1", "G", ["low"], flops=True, code="2e45")  # read as text, not as a number
-    b = _summary_dir(tmp_path / "r2", "G", ["low", "high"], cost=False, code="b3cd")
+    b = _summary_dir(tmp_path / "r2", "G", ["low", "high"], code="b3cd")
     assert set(load_runs([a, b])["judge"]) == {"G [2e45] (low)", "G [b3cd] (low)", "G [b3cd] (high)"}
     assert set(load_runs([a, b, a])["model"]) == {"G [2e45#1]", "G [b3cd]", "G [2e45#3]"}  # one run given twice
-    old = _summary_dir(tmp_path / "old", "G", ["low"], code=None)  # written before run codes were recorded
-    assert set(load_runs([old, _summary_dir(tmp_path / "h", "H", ["low"])])["model"]) == {"G", "H"}  # unique: fine
-    with pytest.raises(ValueError, match="old.*no run code"):
-        load_runs([a, old])
-    # ... unless runs.tsv knows the folder: by its name, or (renamed after download) by the server folder its log names
-    entries = [{"code": "q7rs", "folder": "old", "kind": "run"},
-               {"code": "w8xy", "folder": "split_20261106_185630_m", "kind": "split"}]
-    assert set(load_runs([a, old], entries)["model"]) == {"G [2e45]", "G [q7rs]"}
-    renamed = _summary_dir(tmp_path / "GPT-n2", "G", ["low"], code=None)
-    (renamed / "plot_20261106_192009.log").write_text(
-        "2026-11-06 19:20:09 INFO    root: plotting ['part1', 'part2'] -> /project/x/results/split_20261106_185630_m/merged\n",
-        encoding="utf-8")
-    assert set(load_runs([a, renamed], entries)["model"]) == {"G [2e45]", "G [w8xy]"}
-    with pytest.raises(ValueError, match="none matched in runs.tsv"):
-        load_runs([a, _summary_dir(tmp_path / "nolog", "G", ["low"], code=None)], entries)
+    plain = _summary_dir(tmp_path / "plain", "P", [None])  # a judge without an effort: its cell reads back as NaN
+    assert set(load_runs([a, plain])["judge"]) == {"G (low)", "P"}
+    nocode = _summary_dir(tmp_path / "nocode", "G", ["low"], code=None)
+    assert set(load_runs([nocode, _summary_dir(tmp_path / "h", "H", ["low"])])["model"]) == {"G", "H"}  # unique: fine
+    with pytest.raises(ValueError, match="nocode.*no run code"):
+        load_runs([a, nocode])
     path = tmp_path / "config.yaml"
     import yaml
     path.write_text(yaml.safe_dump({"dataset_dir": str(DATASET), "env_file": None, "results_dir": str(tmp_path),
                                     "providers": {"fake": {"protocol": "fake"}},
                                     "judges": [{"label": "x", "provider": "fake", "model": "m"}]}), encoding="utf-8")
     out = tmp_path / "cmp"
-    assert main(["compare", "r1", str(b), "--config", str(path), "--log-dir", str(tmp_path / "logs"),
+    assert main(["compare", "r1", str(b), str(plain), "--config", str(path), "--log-dir", str(tmp_path / "logs"),
                  "--out-dir", str(out)]) == 0
     assert {p.name for p in out.glob("*.png")} == {"bias_grid.png", "correctness_grid.png",
                                                   "cost_vs_performance.png", "cost_vs_correctness.png",
                                                   "cost_vs_performance_flops.png", "cost_vs_correctness_flops.png"}
-    only_old = tmp_path / "cmp2"
+    no_flops = tmp_path / "cmp2"
     assert main(["compare", str(b), "--config", str(path), "--log-dir", str(tmp_path / "logs"),
-                 "--out-dir", str(only_old)]) == 0
-    assert {p.name for p in only_old.glob("*.png")} == {"bias_grid.png"}
+                 "--out-dir", str(no_flops)]) == 0
+    assert {p.name for p in no_flops.glob("*.png")} == {"bias_grid.png", "correctness_grid.png",
+                                                       "cost_vs_performance.png", "cost_vs_correctness.png"}
 
 
 def test_compare_reads_split_folders_and_export_zips(tmp_path, caplog):
@@ -947,15 +949,12 @@ def test_compare_reads_split_folders_and_export_zips(tmp_path, caplog):
     _summary_dir(split / "part3", "G", ["low", "high"])
     (split / "part2").mkdir()  # failed / timed out: no summary
     pd.read_csv(split / "part3" / "summary.csv").assign(bias="cot").to_csv(split / "part3" / "summary.csv", index=False)
-    assert [str(p) for p in summary_paths(split)] == ["part1/summary.csv", "part3/summary.csv"]  # parts only, no merge
+    assert [str(p) for p in summary_paths(split)] == ["part1/summary.csv", "part3/summary.csv"]
     assert "part2" in caplog.text
     assert set(read_source(split)["bias"]) == {"position", "cot"}
-
-    stale = _summary_dir(split / "merged", "G", ["low"])  # merged before part3 was rerun: parts win, in order
-    pd.read_csv(stale / "summary.csv").assign(value=0.1).to_csv(stale / "summary.csv", index=False)
-    assert [str(p) for p in summary_paths(split)] == ["merged/summary.csv", "part1/summary.csv", "part3/summary.csv"]
-    assert (read_source(split)["value"] == 0.8).all()
-    assert [str(p) for p in summary_paths(split / "merged")] == ["summary.csv"]
+    merged = _summary_dir(tmp_path / "done", "G", ["low"])  # once merged, the split folder's own summary is the run
+    shutil.copytree(split / "part1", merged / "part1")
+    assert [str(p) for p in summary_paths(merged)] == ["summary.csv"]
 
     run = _summary_dir(tmp_path / "plain", "H", ["low"], code="h2jk")
     export = tmp_path / "h2jk.zip"  # `get` export: one wrapping <code>/ folder, no folder entries

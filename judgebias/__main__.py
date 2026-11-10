@@ -56,7 +56,7 @@ def main(argv: list[str] | None = None) -> int:
         if name == "compare":
             sp.add_argument("runs", nargs="+", metavar="RUN",
                             help="downloaded run: folder or zip (path or name under results_dir; a vllm_split.sh "
-                                 "folder not merged yet, with merged/ and/or part*/, works too), or run code; each one's groups are models")
+                                 "folder not merged yet, with part*/, works too), or run code; each one's groups are models")
         if name == "plot":
             sp.add_argument("--run", action="append",
                             help="run code, or folder (path or name under results_dir), repeatable; later wins on overlap")
@@ -107,7 +107,7 @@ def main(argv: list[str] | None = None) -> int:
             out_dir = _out_dir(cfg, args)
             (out_dir / "sources.txt").write_text("".join(f"{d}\n" for d in sources), encoding="utf-8")
             logging.info("comparing %s -> %s", [d.name for d in sources], out_dir)
-            for out in compare_all(sources, out_dir, entries=registry.load(cfg.results_dir)):
+            for out in compare_all(sources, out_dir):
                 print(f"Wrote {out}")
             return 0
         if args.cmd == "check":
@@ -204,7 +204,7 @@ def _list_runs(cfg) -> int:
     if not entries:
         print(f"No runs registered in {registry.registry_path(cfg.results_dir)}")
     for r in entries:
-        done = (registry.result_dir(cfg.results_dir, r) / "summary.csv").exists()
+        done = (registry.run_folder(cfg.results_dir, r) / "summary.csv").exists()
         print(f"{r['code']}  {r['created']}  {r['kind']:<5}  {'done' if done else 'pending':<7}  {r['folder']}  {r['note']}")
     return 0
 
@@ -224,8 +224,8 @@ def _sources(cfg, names: list[str], allow_missing: bool) -> list[Path]:
 
 
 def _compare_source(cfg, name: str) -> Path:
-    """A compare source as given (folder or zip), else under results_dir, else a registered run code (for a split:
-    its folder, so the parts are read too); compare finds the summary inside."""
+    """A compare source as given (folder or zip), else under results_dir, else a registered run code (for an unmerged
+    split: its folder, so the parts are read); compare finds the summary inside."""
     for path in (Path(name), cfg.results_dir / name):
         if path.exists():
             return path
@@ -239,7 +239,7 @@ def _run_dir(cfg, name: str) -> Path:
     if not (path / "summary.csv").exists():
         path = cfg.results_dir / name
     if not (path / "summary.csv").exists() and (entry := registry.lookup(cfg.results_dir, name)):
-        path = registry.result_dir(cfg.results_dir, entry)
+        path = registry.run_folder(cfg.results_dir, entry)
     if not (path / "summary.csv").exists():
         raise FileNotFoundError(f"No summary.csv in run folder '{name}'")
     return path

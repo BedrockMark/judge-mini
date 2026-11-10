@@ -3,7 +3,8 @@
 A small, config-driven reproduction of the bias benchmark from
 [*Justice or Prejudice? Quantifying Biases in LLM-as-a-Judge*](https://arxiv.org/abs/2410.02736) (CALM).
 You list the judges you want — each a **(provider, model, thinking effort)** triple — and the tool runs the
-paper's 12 bias tests on only those judges and draws a 3×4 grid like `Goal.png`.
+paper's 12 bias tests on only those judges and draws a 3×4 grid like `Goal.png`, with a 95% confidence interval on
+every number.
 
 It reuses the paper's datasets and prompt builders from `LLM-Judge-Bias-Dataset/` (not copied).
 
@@ -26,32 +27,28 @@ uv run python -m judgebias check --config config.yaml   # validate config + keys
 uv run python -m judgebias run   --config config.yaml   # run judges x biases -> results/<timestamp>/summary.csv + figures
 uv run python -m judgebias plot  --config config.yaml   # redraw the newest run into a new results/<timestamp>/
 uv run python -m judgebias plot  --config config.yaml --run 20261103_150000 --run 20261103_160000  # merge runs
-uv run python -m judgebias compare --config config.yaml GPT-20b-n3 Qwen27-122  # compare finished runs, no model calls
+uv run python -m judgebias compare --config config.yaml k7m2 a1b2   # compare finished runs, no model calls
 uv run pytest                                           # tests (no API calls)
 ```
 
 - `run` accepts `--judge "<label>"` and `--bias <name>` (both repeatable) to run a subset. Partial runs are merged into `summary.csv`.
 - `check --no-call` skips the live test calls.
-- `compare RUN [RUN ...]` draws finished runs side by side into a new `results_dir/compare_<YYYYmmdd_HHMM>/` folder, without calling any model. A RUN is
-  what you downloaded from the server — a folder or a zip (e.g. from `get`), as a path or a name under `results_dir` —
-  or a run code. Only `summary.csv` is needed: at the top, inside one wrapping folder, or, for a `vllm_split.sh`
-  folder not merged yet, its `part*/` summaries (after an older layout's `merged/` one; a later one wins; missing parts are warned about).
-  Figures: `bias_grid.png` and `correctness_grid.png` cluster the bars by effort tier, and
-  `cost_vs_performance.png` / `cost_vs_correctness.png` (and their `_flops` versions, for judges with FLOPs) overlay
-  all judges. Each (folder, group) is one model (named
-  `group [run code]` when two folders share a group; the code comes from the `code` column of `summary.csv`; an
-  older summary without it gets the code `<results_dir>/runs.tsv` has for its folder, matched by the folder's name or,
-  if it was renamed after download, by the server folder named in the run / plot log copied next to it. If neither
-  matches, compare stops with an error naming the folder). Tiers are bottom-aligned: each model's efforts, low to high, fill
-  T1, T2, … and a model with fewer efforts repeats its highest one upward (hatched). E.g. A `off/on` with B
-  `low/medium/high` gives T1 = A off, B low; T2 = A on, B medium; T3 = A on (repeated), B high. A model whose
-  summary lacks the needed columns (older runs) is left out of that figure.
+- `compare RUN [RUN ...]` draws finished runs side by side into a new `results_dir/compare_<YYYYmmdd_HHMM>/` folder,
+  without calling any model. A RUN is what you downloaded from the server — a folder or a zip (e.g. from `get`), as a
+  path or a name under `results_dir` — or a run code. Only `summary.csv` is needed: at the top, inside one wrapping
+  folder, or, for a `vllm_split.sh` folder not merged yet, its `part*/` summaries (a later part wins; missing parts are
+  warned about). Each (folder, group) is one model, named `group [run code]` when two folders share a group (the code
+  is the `code` column of `summary.csv`). In `bias_grid.png` and `correctness_grid.png` the bars are clustered by
+  effort tier: each model's efforts, low to high, fill T1, T2, … and a model with fewer efforts repeats its highest one
+  upward (hatched). E.g. A `off/on` with B `low/medium/high` gives T1 = A off, B low; T2 = A on, B medium; T3 = A on
+  (repeated), B high. The cost figures overlay all judges; a model without FLOPs is left out of the `_flops` ones.
 - Offline dry run with fake judges (no keys, no cost): `uv run python -m judgebias run --config config.fake.yaml`.
 
 ### `check`
 
 1. Validates the config and that every needed key exists in `.env` (errors exit 2, before any call).
-2. Warns about setups that give an incomplete chart (e.g. Self-Enhancement needs ≥ 2 judges).
+2. Warns about setups that give a weak or empty panel (Self-Enhancement needs ≥ 2 judges, and ≥ 2 *models* to mean
+   what the paper means, see below).
 3. Sends each judge one tiny judging prompt (uncached) and reports `OK` / `FAIL` with the error type and
    message — bad key, no credit, wrong model ID, rejected param, refusal, or reply with no `[[A]]`/`[[B]]` verdict.
    Exits 0 only if all judges pass.
@@ -76,7 +73,9 @@ Run `check` first, and start `run` with a small `samples_per_bias` (e.g. 5) as a
 
 `effort` maps to `reasoning_effort` (OpenAI protocol) or `output_config.effort` (Anthropic protocol);
 `null` sends nothing. `params` is passed through verbatim (e.g. `thinking: {type: between_tools}` to turn
-Sonnet 5.5 thinking off). Judge labels must be unique.
+Sonnet 5.5 thinking off). Judge labels must be unique. Efforts are ordered
+`none < off < minimal < low < medium < high < on < xhigh < max` everywhere (tints, markers, compare tiers, and the
+order queued calls start in: highest first, so the longest generations do not form the run's tail).
 
 One entry with an effort list stands for one judge per effort, labelled `"<label> (<effort>)"`, and forms one
 **group**: the group shares a hue in every figure (lower effort = lighter tint), and its judges are joined by a line
@@ -90,47 +89,64 @@ judges:
 
 ## The 12 panels
 
-| Panel | Data | Perturbation | Metric |
-|---|---|---|---|
-| Position | alignment | swap answer order | Robustness Rate |
-| Verbosity | verbosity | lengthen answer 2 | RR |
-| Compassion-Fade | alignment | real model names instead of "Assistant A/B" | RR |
-| Bandwagon | alignment | "90% of people believe B is better" | RR |
-| Distraction | alignment | irrelevant remark about assistant B | RR |
-| Fallacy-Oversight | fallacy_oversight | answer 1 gets flawed reasoning | RR |
-| Authority | authority | answer 2 gets a fake book/quote/URL reference (avg) | RR |
-| Sentiment | sentiment | answer 1 rewritten cheerful/sad/angry/fearful (avg) | RR |
-| Diversity | alignment | "Assistant B identifies as <group>" (avg) | RR |
-| CoT | fact_related | CoT judging prompt | Accuracy |
-| Self-Enhancement | alignment | judge answers, all judges score it | Error rate = \|self − others\| / others |
-| Refinement-Aware | refinement | score with vs. without "this was refined" note | Error rate = \|Δ\| / unaware |
+| Panel | Data | Perturbation | Metric | `drift > 0` means |
+|---|---|---|---|---|
+| Position | alignment | swap answer order | Robustness Rate | prefers whatever is shown first |
+| Verbosity | verbosity | lengthen answer 2 | RR | moves to the longer answer |
+| Compassion-Fade | alignment | real model names instead of "Assistant A/B" | RR | moves to the second-named model |
+| Bandwagon | alignment | "90% of people believe B is better" | RR | follows the crowd |
+| Distraction | alignment | irrelevant remark about assistant B | RR | moves to the distracted assistant |
+| Fallacy-Oversight | fallacy_oversight | answer 1 gets flawed reasoning | RR | notices the fallacy (desired) |
+| Authority | authority | answer 2 gets a fake book/quote/URL reference (avg) | RR | moves to the cited answer |
+| Sentiment | sentiment | answer 1 rewritten cheerful/sad/angry/fearful (avg) | RR | moves away from the emotional answer |
+| Diversity | alignment | "Assistant B identifies as <group>" (avg) | RR | moves to the labelled assistant |
+| CoT | fact_related | CoT judging prompt | Accuracy | — |
+| Self-Enhancement | alignment | judge answers, all judges score it | Error rate = \|self − others\| / others | — |
+| Refinement-Aware | refinement | score with vs. without "this was refined" note | Error rate = \|Δ\| / unaware | — |
 
 RR = share of items whose verdict (mapped back to the underlying answer) is unchanged by the perturbation;
 unparseable verdicts count as non-robust and are tallied in `n_invalid`. Fallacy-Oversight is the exception (paper
-App. C): answer 1's reasoning is made chaotic, so an item is robust when the verdict *changes*. The red dashed line is the mean
-Consistency Rate across judges for RR panels, and the mean metric across judges for the others.
+App. C): answer 1's reasoning is made chaotic, so an item is robust when the verdict *changes*. The red dashed line is
+the mean Consistency Rate across judges for RR panels, and the mean metric across judges for the others.
 Perturbations that target one answer always target the rejected one (answer 2), except Fallacy-Oversight and
 Sentiment (answer 1). Dataset rows missing a perturbed field are skipped, not invented.
+
+**Drift** separates a directed bias from noise, which RR alone cannot: it is the net share of items whose verdict moved
+from answer 1 to answer 2 under the perturbation (`(#1→2 − #2→1) / items`, in −1…1). A judge whose RR is 0.8 with
+drift +0.2 moved every flipped item toward answer 2 (a bias); RR 0.8 with drift 0 flipped equally in both directions
+(inconsistency, compare the CR). The sign's meaning per panel is in the table.
+
+**Confidence intervals.** `value_lo` / `value_hi` are 95% intervals (Wilson for RR, accuracy and Correctness; normal
+on the mean for error rates), drawn as error bars on every bar and marker. Items are taken as independent; panels with
+several perturbations per row (Authority, Sentiment, Diversity) count each perturbation as an item, so their
+intervals are a little too narrow. Two judges whose intervals overlap widely are not shown to differ.
+
+**Self-Enhancement caveat.** The paper's "others" are other *models*. A run holding one model at several efforts
+(every `vllm_split.sh` job) can only compare a judge with the same model's other efforts, so its error rate measures
+effort-to-effort rating noise rather than self-preference; `check` warns, the run log warns, and `extra` records
+`same_model_only: true`. For the paper's measure, put several models in one run (API judges, or `plot --run` cannot
+help here: the scoring calls have to happen in the same run).
 
 ## Layout
 
 ```
 config.yaml / config.fake.yaml   real and offline configs
 judgebias/
-  config.py       config models, .env loading, key matching
+  config.py       config models, .env loading, key matching, effort order
   check.py        pre-flight check with live test calls
   llm/            protocol adapters (openai, anthropic, fake), per-run JSONL response cache
   context.py      cached, concurrency-limited `ask` shared by all biases
-  data.py, prompts.py, parse.py, metrics.py
+  data.py, prompts.py, parse.py, metrics.py (metrics + intervals + drift)
   biases/         one module/registration per panel; registry is `BIASES`
   runner.py       judge x bias loop -> results/<timestamp>/
   plot.py         3x4 bias grid, cost vs. metric / Correctness grids, utility plot
+  compare.py      several runs side by side (tiered bars)
 tests/            pytest suite (no network)
 ```
 
 Every command also writes all log records (INFO and above, including warnings, errors and tracebacks) to
-`<log_dir>/<command>_<YYYYmmdd_HHMMSS>.log`, one file per invocation; `run` and `plot` also copy it into their
-`results/<YYYYmmdd_HHMMSS>/` folder when they finish (or fail).
+`<log_dir>/<command>_<YYYYmmdd_HHMMSS>.log`, one file per invocation; `run`, `plot` and `compare` also copy it into
+their results folder when they finish (or fail).
 
 Every `run` and `plot` writes to a new `results/<YYYYmmdd_HHMMSS>/` folder, so earlier outputs are never overwritten:
 `summary.csv`, the figures (see below), `examples.zip` (the `examples/` folder is deleted once zipped; no per-item
@@ -142,13 +158,17 @@ the original file) (run), or the merged `summary.csv`, the figures, `examples.zi
 creates a new run folder holding just that snapshot and prints its path; `job.sh` / `vllm_job.sh` use it at
 submission, then run with `--out-dir` that folder, so the config a queued job reads is the one kept with its results.
 
+The figures are drawn from `summary.csv` alone: the judges, their groups and efforts come from its columns, so a
+merged summary never loses a judge the config does not list; the config is only consulted for a judge's `color`.
+
 Each `run` / `plot` (and each `vllm_split.sh` job) gets a 4-character run code, printed as `Run code: k7m2` and
 recorded in `<results_dir>/runs.tsv`. `python -m judgebias runs` lists the codes (done / pending);
 `python -m judgebias get <code>` zips only that run's result files (summary, figures, `examples.zip`, `config.yaml`,
 logs) into `<results_dir>/exports/<code>.zip` for download; `plot --run <code>` also accepts a code. The code is
 also stored in `summary.csv` (`code` column). The job scripts draw it at submission and name the Slurm job after it:
 `job.sh` → `<code>_run` / `<code>_plot`, `vllm_job.sh` and `vllm_split.sh`'s parts → `<code>_<model>` (e.g.
-`k7m2_gpt-oss-20b`), the split's merge → `<code>_merge`.
+`k7m2_gpt-oss-20b`), the split's merge → `<code>_merge`. A split's folder holds `part<i>/` until the merge writes the
+result into the folder itself and deletes the parts.
 Nothing is reused between runs: every `run` calls the APIs afresh. Within one run, responses are cached by
 (provider, model, effort, params, prompt, repeat) in `results/<YYYYmmdd_HHMMSS>/cache/` so identical calls are made
 once; that cache is deleted when the run finishes. A run that fails or is killed keeps it, and the only thing that
@@ -170,23 +190,26 @@ Invalid = a verdict/score needed for the comparison could not be parsed (or the 
 
 | File | Shows |
 |---|---|
-| `bias_grid.png` | the 3×4 grid above: one bar per judge per bias |
-| `cost_vs_performance.png` | per bias: mean output tokens per call (x, log) vs. that bias's metric (y) |
-| `correctness_grid.png` | same grid, one bar per judge per bias showing Correctness; bars ordered by model (config entry), then effort |
+| `bias_grid.png` | the 3×4 grid above: one bar per judge per bias, with its 95% interval |
+| `cost_vs_performance.png` | per bias: mean output tokens per call (x, log) vs. that bias's metric (y, with interval) |
+| `correctness_grid.png` | same grid, one bar per judge per bias showing Correctness; bars grouped by judge group, then effort |
 | `cost_vs_correctness.png` | per bias: mean output tokens per call (x, log) vs. Correctness (y) |
-| `utility.png` + `utility.csv` | per judge: mean output tokens per call over all its calls (x) vs. mean Correctness across biases (y; error bar = std across biases) |
+| `utility.png` + `utility.csv` | per judge: mean output tokens per call over all its calls (x) vs. mean Correctness across biases (y; error bar = std across biases, i.e. how uneven the judge is across panels, not sampling error) |
 | `cost_vs_performance_flops.png`, `cost_vs_correctness_flops.png` | the two cost grids with mean FLOPs per call as the cost; only for judges served by `vllm_job.sh` / `vllm_split.sh` |
 
 **Correctness** = `n_correct / samples` over every judged call of that judge × bias (the correct/wrong/invalid rule
 above; invalid counts as not correct; `examples/` only shows a few of them), so every bias is on the same 0–1,
 higher-is-better scale and can be averaged. **Cost** = output tokens as reported by the API (thinking/reasoning
 included), averaged per call. Every call a bias makes counts, cache hits included, so the cost does not depend on what
-was cached; Self-Enhancement scoring calls are billed to the judge that scored. In the cost plots, the marker shape shows the effort
-and a group's judges are joined by a gray line in effort order (`minimal` < `low` < `medium` < `high` < `xhigh` < `max`).
+was cached; Self-Enhancement scoring calls are billed to the judge that scored. In the cost plots, the marker shape
+shows the effort and a group's judges are joined by a gray line in effort order.
 
-`summary.csv` carries `group`, `samples`, `n_correct`, `n_wrong` (invalid = the rest), `correctness`, `calls` (calls with a known token count), `out_tokens` (mean output tokens
-per call), `flops` and `flops_scale` (below). Token counts are stored in the response cache; calls without a reported count are left out of `out_tokens` (a warning is logged), and a judge × bias with no known count is skipped in
-the cost plots.
+`summary.csv` columns: `judge`, `group`, `model`, `effort`, `bias`, `metric`, `value`, `value_lo`, `value_hi`,
+`drift` (robustness panels only), `cr`, `n` (dataset rows), `n_invalid`, `samples`, `n_correct`, `n_wrong` (invalid =
+the rest), `correctness`, `calls` (calls with a known token count), `out_tokens` (mean output tokens per call),
+`flops`, `flops_scale` (below), `extra` (JSON: CoT's `no_cot_accuracy` and `cot_gain`, Self-Enhancement's `others` and
+`same_model_only`), `code`. Calls whose usage the API did not report are left out of `out_tokens` (a warning is
+logged), and a judge × bias with no known count is skipped in the cost plots.
 
 **FLOPs (vLLM jobs).** `vllm_job.sh` starts vLLM with `--enable-mfu-metrics`, and `config.vllm.yaml` marks its provider
 `flops: true`. vLLM only reports a server-wide counter (`vllm:estimated_flops_per_gpu_total` on `/metrics`), and all
@@ -196,8 +219,10 @@ experts, logits) from the model's `config.json` and the call's prompt / output t
 estimates are then scaled so that the run's calls add up to the counter's increase over the run (per-GPU value ×
 TP GPUs, summed over replicas): `flops_scale` = measured / estimated, and `flops` = mean scaled FLOPs per call, billed
 like `out_tokens` (cache hits included). The scale also absorbs what the estimate leaves out, e.g. vLLM's prefix-cache
-hits and retried requests. If the counter cannot be read, `flops_scale` is NaN and `flops` is the bare estimate (a
-warning is logged); judges of other providers have NaN `flops` and are left out of the FLOP plots.
+hits and retried requests, so it should sit between about 0.5 and 2; the run logs a warning outside that range, and
+the FLOP figures of such a run should not be trusted (gpt-oss-20b measured 0.08: vLLM and the estimate disagree on
+that model). If the counter cannot be read, `flops_scale` is NaN and `flops` is the bare estimate (a warning is
+logged); judges of other providers have NaN `flops` and are left out of the FLOP plots.
 
 ## Extending
 

@@ -9,7 +9,6 @@ from pathlib import Path
 DATASET_FILES = {
     "alignment": "base_datasets/alignment_dataset.json",
     "fact_related": "base_datasets/fact_related_dataset.json",
-    "refinement_aware": "base_datasets/refinement_aware_dataset.json",
     "authority": "bias_datasets/authority_bias_standardized.json",
     "fallacy_oversight": "bias_datasets/fallacy_oversight_bias_standardized.json",
     "refinement": "bias_datasets/refinement_bias_standardized.json",

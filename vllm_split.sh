@@ -52,7 +52,7 @@ results_dir = load_config(sys.argv[1]).results_dir
 entry = registry.lookup(results_dir, sys.argv[2])
 if entry is None or entry["kind"] != "split":
     sys.exit(f"No vllm_split.sh run with code '{sys.argv[2]}' in {registry.registry_path(results_dir)}")
-print(registry.result_dir(results_dir, entry).parent)
+print(registry.run_folder(results_dir, entry))
 EOF
 )
     [[ -f $OUT/split.vars ]] || { echo "$OUT/split.vars not found; cannot resume." >&2; exit 1; }

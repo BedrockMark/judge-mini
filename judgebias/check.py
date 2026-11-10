@@ -53,6 +53,9 @@ def run_check(cfg: Config, live: bool = True) -> bool:
     print(f"Config OK: {len(cfg.judges)} judge(s), {len(biases)} bias(es); keys found for {sorted(keys)}")
     if "self_enhancement" in biases and len(cfg.judges) < 2:
         print("  warning: self_enhancement needs >= 2 judges; its panel will be empty")
+    elif "self_enhancement" in biases and len({j.model for j in cfg.judges}) == 1:
+        print("  warning: self_enhancement compares a judge with the other judges, and all of them are the same model "
+              "(other efforts); its error rate will measure effort-to-effort rating noise, not self-preference")
     if not live:
         return True
 

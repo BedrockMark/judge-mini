@@ -7,17 +7,13 @@ import logging
 from dataclasses import dataclass, field
 from types import ModuleType
 
-from .config import Config, JudgeSpec
+from .config import Config, JudgeSpec, effort_rank
 from .data import load_dataset
 from .flops import FlopModel
 from .llm import ChatClient, Completion, PriorityGate, RateLimiter, ResponseCache, cache_key
 from .prompts import load_templates
 
 log = logging.getLogger(__name__)
-
-# Queued calls start in this order of effort (high first): the longest generations start early instead of
-# forming the run's tail. Efforts not listed (incl. None) rank as 0.
-EFFORT_ORDER = ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
 
 # The bias being evaluated; set by the runner so every `ask` (cache hits too) is billed to (asked judge, bias).
 current_bias: contextvars.ContextVar[str | None] = contextvars.ContextVar("current_bias", default=None)
@@ -26,7 +22,7 @@ current_bias: contextvars.ContextVar[str | None] = contextvars.ContextVar("curre
 @dataclass
 class Usage:
     calls: int = 0  # successful asks
-    known: int = 0  # ... of which the output token count is known (older cache entries lack it)
+    known: int = 0  # ... of which the output token count is known (the API reported usage)
     output_tokens: int = 0
     flops_known: int = 0  # ... of which the FLOPs are estimated (a `flops` provider, prompt + output tokens known)
     flops: float = 0.0  # estimate before the runner scales it to vLLM's measured total
@@ -80,7 +76,10 @@ class Context:
             return Completion(hit, reasoning=self.cache.reasoning(key))
         if key not in self._inflight:
             self._inflight[key] = asyncio.ensure_future(self._call(key, judge, prompt, run_idx))
-        text = await self._inflight[key]
+        try:
+            text = await self._inflight[key]
+        finally:
+            self._inflight.pop(key, None)  # later asks hit the cache (or retry a failed call)
         if text is not None:
             self._bill(judge, key)
         return text
@@ -111,8 +110,8 @@ class Context:
             per_replica = self.cfg.providers[judge.provider].concurrency or self.cfg.concurrency
             gate = self._gates[(judge.provider, judge.model)] = PriorityGate(per_replica * client.replicas)
         limiter = self._limiters.get(judge.provider)
-        effort = str(judge.effort).lower()
-        await gate.acquire(-(EFFORT_ORDER.index(effort) if effort in EFFORT_ORDER else 0))
+        # Queued calls start highest effort first: the longest generations start early instead of forming the tail.
+        await gate.acquire(-effort_rank(judge.effort))
         try:
             attempt = throttled = 0
             while attempt < 3:

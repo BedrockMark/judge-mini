@@ -57,16 +57,10 @@ def lookup(results_dir: Path, code: str) -> dict | None:
 
 
 def run_folder(results_dir: Path, entry: dict) -> Path:
-    """The registered folder (for a split job, the one holding its parts / result)."""
+    """The registered folder: the run's results, or for a split job the folder holding its part<i>/ until the merge
+    writes the result there."""
     folder = Path(entry["folder"])
     return folder if folder.is_absolute() else results_dir / folder
-
-
-def result_dir(results_dir: Path, entry: dict) -> Path:
-    """The folder holding the finished result: the registered folder itself, except a split job's merged/ until every
-    part is merged (the merge then moves the result up into the split folder and deletes merged/ and the parts)."""
-    folder = run_folder(results_dir, entry)
-    return folder / "merged" if entry["kind"] == "split" and not (folder / "summary.csv").exists() else folder
 
 
 def export(results_dir: Path, code: str, dest: Path | None = None) -> Path:
@@ -75,11 +69,11 @@ def export(results_dir: Path, code: str, dest: Path | None = None) -> Path:
     entry = lookup(results_dir, code)
     if entry is None:
         raise FileNotFoundError(f"No run with code '{code}' in {registry_path(results_dir)}")
-    folder = result_dir(results_dir, entry)
+    folder = run_folder(results_dir, entry)
     if not (folder / "summary.csv").exists():
         detail = ""
         if entry["kind"] == "split":
-            parts = sorted(folder.parent.glob("part*"))
+            parts = sorted(folder.glob("part*"))
             finished = ", ".join(f"{p.name}={'yes' if (p / 'summary.csv').exists() else 'no'}" for p in parts)
             detail = (f" (not merged yet; parts finished: {finished or 'none'}; "
                       f"a part that timed out or failed: bash vllm_split.sh --resume {entry['code']})")

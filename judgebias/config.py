@@ -15,6 +15,17 @@ class ConfigError(ValueError):
     pass
 
 
+# Effort levels, low to high; the names the API protocols accept plus on/off for models that only toggle thinking.
+# Governs the tint within a judge group, the order of a group's markers in the cost plots, compare's tiers, and the
+# order queued calls start in (highest first). Anything else ranks last, in config order.
+EFFORT_ORDER = [None, "none", "off", "minimal", "low", "medium", "high", "on", "xhigh", "max"]
+
+
+def effort_rank(effort: str | None) -> int:
+    key = effort.lower() if isinstance(effort, str) else effort
+    return EFFORT_ORDER.index(key) if key in EFFORT_ORDER else len(EFFORT_ORDER)
+
+
 class ProviderSpec(BaseModel):
     protocol: Literal["openai", "anthropic", "fake"]
     base_url: str | None = None  # openai protocol: several comma-separated replicas are load-balanced

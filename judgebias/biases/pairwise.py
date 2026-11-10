@@ -7,6 +7,7 @@ swaps are comparable to unswapped prompts.
 RR (paper Sec. 3): a perturbed verdict is robust when it matches the unperturbed one, except for
 Fallacy-Oversight (paper App. C): answer 1 is made logically chaotic, so the robust verdict *changes*.
 Correctness compares the perturbed verdict to the ground truth: answer 1, or answer 2 for Fallacy-Oversight.
+Drift (metrics.drift) tells a directed bias from noise: the net share of verdicts that moved toward answer 2.
 """
 from __future__ import annotations
 
@@ -16,7 +17,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from types import ModuleType
 
-from ..metrics import consistency_rate, robustness_rate
+from ..metrics import consistency_rate, drift, is_robust, proportion
 from ..parse import parse_verdict
 from .base import Bias, BiasResult, register, sample
 
@@ -53,33 +54,28 @@ class PerturbationBias(Bias):
         self.truth = "2" if expect_change else "1"
 
     async def evaluate(self, judge, ctx) -> BiasResult:
-        T, opts = ctx.T, ctx.options(self.name)
+        T, opts, repeats = ctx.T, ctx.options(self.name), ctx.cfg.cr_repeats
 
-        async def run_item(row: dict) -> dict:
+        async def run_item(row: dict) -> tuple[list, list, list]:
             orig_prompt = base_prompt(row, T)
             variants = self.variants(row, T, opts)
-            outs = await asyncio.gather(
-                *(ctx.ask(judge, orig_prompt, r) for r in range(ctx.cfg.cr_repeats)),
-                *(ctx.ask(judge, v.prompt) for v in variants),
-            )
-            orig = [to_answer(parse_verdict(o), False) for o in outs[: ctx.cfg.cr_repeats]]
-            pert = {v.name: to_answer(parse_verdict(o), v.swapped)
-                    for v, o in zip(variants, outs[ctx.cfg.cr_repeats:])}
-            samples = [self._sample(row["_idx"], v, out, orig[0], pert[v.name], outs[0])
-                       for v, out in zip(variants, outs[ctx.cfg.cr_repeats:])]
-            return {"idx": row["_idx"], "original": orig, "perturbed": pert}, samples
+            outs = await asyncio.gather(*(ctx.ask(judge, orig_prompt, r) for r in range(repeats)),
+                                        *(ctx.ask(judge, v.prompt) for v in variants))
+            orig = [to_answer(parse_verdict(o), False) for o in outs[:repeats]]
+            pert = [to_answer(parse_verdict(o), v.swapped) for v, o in zip(variants, outs[repeats:])]
+            samples = [self._sample(row["_idx"], v, out, orig[0], p, outs[0])
+                       for v, out, p in zip(variants, outs[repeats:], pert)]
+            return orig, pert, samples
 
         done = await asyncio.gather(*(run_item(r) for r in ctx.data(self.dataset)))
-        records = [rec for rec, _ in done]
-        pairs = [(rec["original"][0], p) for rec in records for p in rec["perturbed"].values()]
-        all_choices = [c for rec in records for c in [*rec["original"], *rec["perturbed"].values()]]
+        pairs = [(orig[0], p) for orig, pert, _ in done for p in pert]  # RR compares each variant to repeat 0
+        value, ci = proportion([is_robust(o, p, self.expect_change) for o, p in pairs])
         return BiasResult(
-            value=robustness_rate(pairs, self.expect_change),
-            cr=consistency_rate([rec["original"] for rec in records]),
-            n=len(records),
-            n_invalid=sum(c is None for c in all_choices),
-            records=records,
-            samples=[s for _, samples in done for s in samples],
+            value=value, ci=ci, n=len(done),
+            cr=consistency_rate([orig for orig, _, _ in done]),
+            drift=drift(pairs),
+            n_invalid=sum(c is None for orig, pert, _ in done for c in [*orig, *pert]),
+            samples=[s for _, _, samples in done for s in samples],
         )
 
     def _sample(self, idx, v: Variant, out: str | None, orig: str | None, pert: str | None,

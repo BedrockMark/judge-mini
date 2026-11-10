@@ -1,6 +1,6 @@
-"""Append-only JSONL response cache. Only successful responses are stored, so failures are retried next run.
-Each record also keeps the response's output and prompt token counts (missing in entries written before they were
-recorded) and the thinking text, when the API returned one. Every record is flushed as written, so a run killed midway leaves the calls it finished (see runner.run)."""
+"""Append-only JSONL response cache. Only successful responses are stored, so failures are retried. Each record also
+keeps the response's output and prompt token counts and the thinking text, when the API returned them. Every record
+is flushed as written, so a run killed midway leaves the calls it finished for a resume (see runner.run)."""
 from __future__ import annotations
 
 import hashlib
