@@ -10,6 +10,8 @@ import yaml
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
+from .data import DATASET_FILES
+
 
 class ConfigError(ValueError):
     pass
@@ -65,6 +67,24 @@ def expand_efforts(raw: dict) -> list[dict]:
     return [{**raw, "label": f"{raw.get('label')} ({e})", "effort": e, "group": raw.get("label")} for e in efforts]
 
 
+class VariantSpec(BaseModel):
+    """One perturbation of a declared task: the row field shown instead of the question / answer1 / answer2."""
+    name: str
+    question: str | None = None
+    answer1: str | None = None
+    answer2: str | None = None
+    swapped: bool = False  # show answer 2 in position A
+
+
+class TaskSpec(BaseModel):
+    """A pairwise perturbation task declared in the config (biases/custom.py), measured by Robustness Rate."""
+    name: str
+    title: str | None = None  # panel title (default: name)
+    dataset: str  # a built-in dataset or one listed under `datasets`
+    variants: list[VariantSpec] = Field(min_length=1)
+    expect_change: bool = False  # the perturbation ruins answer 1, so a robust verdict changes (as Fallacy-Oversight)
+
+
 class Config(BaseModel):
     dataset_dir: Path
     env_file: Path | None = Path(".env")
@@ -79,6 +99,10 @@ class Config(BaseModel):
     judges: list[JudgeSpec]
     biases: Literal["all"] | list[str] = "all"
     bias_options: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    # Extra or replacement datasets: name -> JSON (a list of rows) or JSONL file, relative to this config's folder.
+    datasets: dict[str, Path] = Field(default_factory=dict)
+    plugins: list[str] = Field(default_factory=list)  # .py files (relative to this config) or module names
+    tasks: list[TaskSpec] = Field(default_factory=list)  # declarative pairwise tasks
 
     @field_validator("judges", mode="before")
     @classmethod
@@ -97,15 +121,32 @@ class Config(BaseModel):
                 raise ConfigError(f"Judge '{j.label}' uses unknown provider '{j.provider}'")
         if self.cr_repeats < 2:
             raise ConfigError("cr_repeats must be >= 2 to measure consistency")
+        names = [t.name for t in self.tasks]
+        if len(set(names)) != len(names):
+            raise ConfigError(f"Task names must be unique: {names}")
+        for t in self.tasks:
+            if t.dataset not in DATASET_FILES and t.dataset not in self.datasets:
+                raise ConfigError(f"Task '{t.name}' uses unknown dataset '{t.dataset}'; "
+                                  f"available: {sorted({*DATASET_FILES, *self.datasets})}")
         return self
 
     def selected_biases(self) -> list[str]:
-        from .biases import BIASES
-        names = list(BIASES) if self.biases == "all" else list(self.biases)
+        """The biases to run, in panel order (`all`: the built-in ones, then plugins' and declared tasks); loads the
+        config's plugins and tasks first."""
+        from .biases import BIASES, BUILTIN, load_custom
+        available = list(dict.fromkeys([*BUILTIN, *load_custom(self)]))
+        names = available if self.biases == "all" else list(self.biases)
         unknown = [b for b in names if b not in BIASES]
         if unknown:
-            raise ConfigError(f"Unknown biases {unknown}; available: {list(BIASES)}")
+            raise ConfigError(f"Unknown biases {unknown}; available: {available}")
         return names
+
+    def dataset_path(self, name: str) -> Path:
+        if name in self.datasets:
+            return self.datasets[name]
+        if name in DATASET_FILES:
+            return self.dataset_dir / DATASET_FILES[name]
+        raise ConfigError(f"Unknown dataset '{name}'; available: {sorted({*DATASET_FILES, *self.datasets})}")
 
 
 def parse_config(raw: dict) -> Config:
@@ -119,10 +160,12 @@ def load_config(path: str | Path) -> Config:
     path = Path(path)
     cfg = parse_config(yaml.safe_load(path.read_text(encoding="utf-8")))
     base = path.resolve().parent
-    for field in ("dataset_dir", "env_file", "results_dir", "log_dir"):
+    for field in PATH_FIELDS:
         value = getattr(cfg, field)
         if value is not None and not value.is_absolute():
             setattr(cfg, field, base / value)
+    cfg.datasets = {k: v if v.is_absolute() else base / v for k, v in cfg.datasets.items()}
+    cfg.plugins = [str(base / p) if p.endswith(".py") and not Path(p).is_absolute() else p for p in cfg.plugins]
     if cfg.log_dir is None:
         cfg.log_dir = cfg.results_dir / "logs"
     return cfg
@@ -142,6 +185,10 @@ def snapshot_config(src: str | Path, dest: str | Path) -> Path:
     for field in PATH_FIELDS:
         value = getattr(cfg, field)
         raw[field] = None if value is None else str(value)
+    if cfg.datasets:
+        raw["datasets"] = {k: str(v) for k, v in cfg.datasets.items()}
+    if cfg.plugins:
+        raw["plugins"] = cfg.plugins
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_text(f"{SNAPSHOT_HEADER}{config_origin(src)} ({datetime.now():%Y-%m-%d %H:%M:%S})\n"
                     "# Paths made absolute. Jobs submitted with this copy read it, not the original.\n"

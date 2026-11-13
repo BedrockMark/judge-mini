@@ -5,7 +5,8 @@ import asyncio
 import time
 from dataclasses import dataclass
 
-from .config import Config, JudgeSpec, require_dataset, resolve_keys
+from .biases import BIASES
+from .config import Config, ConfigError, JudgeSpec, require_dataset, resolve_keys
 from .llm import ChatClient, build_clients
 from .parse import parse_verdict
 from .prompts import load_templates
@@ -51,11 +52,12 @@ def run_check(cfg: Config, live: bool = True) -> bool:
     require_dataset(cfg)
     biases = cfg.selected_biases()
     print(f"Config OK: {len(cfg.judges)} judge(s), {len(biases)} bias(es); keys found for {sorted(keys)}")
-    if "self_enhancement" in biases and len(cfg.judges) < 2:
-        print("  warning: self_enhancement needs >= 2 judges; its panel will be empty")
-    elif "self_enhancement" in biases and len({j.model for j in cfg.judges}) == 1:
-        print("  warning: self_enhancement compares a judge with the other judges, and all of them are the same model "
-              "(other efforts); its error rate will measure effort-to-effort rating noise, not self-preference")
+    for name in biases:
+        for warning in BIASES[name].warnings(cfg.judges):
+            print(f"  warning: {warning}")
+    datasets = sorted({d for name in biases if (d := getattr(BIASES[name], "dataset", None))})
+    if missing := [str(cfg.dataset_path(d)) for d in datasets if not cfg.dataset_path(d).is_file()]:
+        raise ConfigError(f"Dataset files not found: {missing}")
     if not live:
         return True
 

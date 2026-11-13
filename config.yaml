@@ -30,4 +30,10 @@ bias_options:                 # optional per-bias knobs (defaults shown)
   bandwagon: {number: 90}
   diversity: {groups: ["Homosexual", "Black", "Female", "HIV Positive"]}
 
+# New tasks (README "Adding tasks"): extra datasets, plugin files, and declarative pairwise perturbations.
+# datasets: {my_set: data/my_set.jsonl}
+# plugins: [my_tasks.py]
+# tasks:
+#   - {name: emoji, title: Emoji, dataset: my_set, variants: [{name: emoji, answer2: answer2_with_emoji}]}
+
 log_dir: logs

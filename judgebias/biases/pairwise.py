@@ -1,8 +1,10 @@
 """Generic "original vs perturbed" pairwise bias measured by Robustness Rate, plus the 9 panels using it.
 
 To add a bias: write a `variants(row, T, opts)` function returning Variant(s) and register a
-PerturbationBias. Choices are normalised to which *underlying* answer won ("1" or "2"), so position
-swaps are comparable to unswapped prompts.
+PerturbationBias (in a plugin file, see config `plugins`; or, when the perturbation only swaps in other fields of the
+row, declare it under config `tasks`, biases/custom.py). Rows need `question`, `answer1` (the better answer) and
+`answer2`, unless `prompt` builds the unperturbed prompt differently. Choices are normalised to which *underlying*
+answer won ("1" or "2"), so position swaps are comparable to unswapped prompts.
 
 RR (paper Sec. 3): a perturbed verdict is robust when it matches the unperturbed one, except for
 Fallacy-Oversight (paper App. C): answer 1 is made logically chaotic, so the robust verdict *changes*.
@@ -35,6 +37,7 @@ class Variant:
 
 
 VariantFn = Callable[[dict, ModuleType, dict], list[Variant]]
+PromptFn = Callable[[dict, ModuleType], str]  # the unperturbed prompt of a row
 
 
 @dataclass
@@ -61,9 +64,13 @@ def base_prompt(row: dict, T: ModuleType, a1: str | None = None, a2: str | None 
 
 class PerturbationBias(Bias):
     metric = "robustness"
+    case_note = ("Bias better case: the unbiased prompt's verdict was wrong (picked answer 2) but the biased prompt's "
+                 "was correct; bias worse case: the reverse. On the unbiased prompt answer 1 is always correct; the "
+                 "biased prompt is graded as in correct.md (e.g. answer 2 for Fallacy-Oversight).")
 
-    def __init__(self, name: str, title: str, dataset: str, variants: VariantFn, expect_change: bool = False):
-        self.name, self.title, self.dataset, self.variants = name, title, dataset, variants
+    def __init__(self, name: str, title: str, dataset: str, variants: VariantFn, expect_change: bool = False,
+                 prompt: PromptFn = base_prompt):
+        self.name, self.title, self.dataset, self.variants, self.prompt = name, title, dataset, variants, prompt
         self.expect_change = expect_change  # the perturbation ruins answer 1, so answer 2 becomes the correct pick
         self.truth = "2" if expect_change else "1"
 
@@ -71,7 +78,7 @@ class PerturbationBias(Bias):
         T, opts, repeats = ctx.T, ctx.options(self.name), ctx.cfg.cr_repeats
 
         async def run_item(row: dict) -> tuple[list, list, list]:
-            orig_prompt = base_prompt(row, T)
+            orig_prompt = self.prompt(row, T)
             variants = self.variants(row, T, opts)
             outs = await asyncio.gather(*(ctx.ask(judge, orig_prompt, r) for r in range(repeats)),
                                         *(ctx.ask(judge, v.prompt) for v in variants))
@@ -88,11 +95,12 @@ class PerturbationBias(Bias):
         pairs = [pair for item in items for pair in item.pairs]
         value, ci = proportion([is_robust(o, p, self.expect_change) for o, p in pairs])
         cr = self._cr(items)
+        drift_lo, drift_hi = bootstrap_ci(items, lambda xs: drift([p for x in xs for p in x.pairs]))
         return BiasResult(
             value=value, ci=ci, n=len(items),
-            cr=cr, expected_rr=expected_rr(cr, self.expect_change),
+            expected=expected_rr(cr, self.expect_change),
             effect=self._effect(items), effect_ci=bootstrap_ci(items, self._effect),
-            drift=drift(pairs), drift_ci=bootstrap_ci(items, lambda xs: drift([p for x in xs for p in x.pairs])),
+            stats={"cr": cr, "drift": drift(pairs), "drift_lo": drift_lo, "drift_hi": drift_hi},
             base_correctness=proportion([c == "1" for item in items for c in item.orig])[0],
             n_invalid=sum(c is None for item in items for c in [*item.orig, *(p for _, p in item.pairs)]),
             samples=[s for _, samples in done for s in samples],

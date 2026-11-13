@@ -24,6 +24,14 @@ SELF_TOLERANCE = 0.5
 class SelfEnhancementBias(Bias):
     name, title, metric = "self_enhancement", "Self-Enhancement", "error_rate"
 
+    def warnings(self, judges) -> list[str]:
+        if len(judges) < 2:
+            return ["self_enhancement needs >= 2 judges; its panel will be empty"]
+        if len({j.model for j in judges}) == 1:
+            return ["self_enhancement compares a judge with the other judges, and all of them are the same model "
+                    "(other efforts); its error rate will measure effort-to-effort rating noise, not self-preference"]
+        return []
+
     async def evaluate(self, judge, ctx) -> BiasResult:
         others = [j for j in ctx.judges if j.label != judge.label]
         rows = ctx.data("alignment")

@@ -1,6 +1,7 @@
 """Writes results/examples/<bias>/<judge>/{correct,wrong,invalid}.md: up to `k` examples each, with counts on top.
 Biases whose samples carry a `base_status` (the unbiased prompt's verdict: robustness panels and CoT) also get
-bias_better_case.md (unbiased prompt wrong, biased prompt correct) and bias_worse_case.md (the reverse). Examples are
+bias_better_case.md (unbiased prompt wrong, biased prompt correct) and bias_worse_case.md (the reverse), explained by
+the bias's `case_note`. Examples are
 drawn from distinct dataset rows (so distinct unbiased prompts) first; a row repeats only when there are too few."""
 from __future__ import annotations
 
@@ -61,9 +62,7 @@ def render(judge, bias, status: str, samples: list[dict], k: int) -> str:
         "(e.g. sentiment tones, authority kinds, diversity groups) yields several samples per row.",
     ]
     if extra_cols:
-        lines += ["", "Bias better case: the unbiased prompt's verdict was wrong (picked answer 2) but the biased "
-                  "prompt's was correct; bias worse case: the reverse. On the unbiased prompt answer 1 is always "
-                  "correct; the biased prompt is graded as in correct.md (e.g. answer 2 for Fallacy-Oversight)."]
+        lines += ["", bias.case_note]
     lines += ["", f"Showing {len(shown)} of {counts[status]} {status} examples "
               f"(from {len({x['idx'] for x in shown})} distinct dataset rows; {len({x['idx'] for x in matching})} available)."]
     for i, x in enumerate(shown, 1):

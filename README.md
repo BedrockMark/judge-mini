@@ -68,8 +68,11 @@ Run `check` first, and start `run` with a small `samples_per_bias` (e.g. 5) as a
 | `log_dir` | Where log files go (default `<results_dir>/logs`); override per run with `--log-dir` |
 | `providers` | `name: {protocol: openai\|anthropic, base_url, api_key_env}`; any OpenAI-compatible endpoint works (use `token_param: max_tokens` if it needs it) |
 | `judges` | `{label, provider, model, effort, params?, color?}` — only these are ever called; `effort` may be a list |
-| `biases` | `all` or a list of bias names |
+| `biases` | `all` (the 12 built-in panels, then plugin and declared tasks) or a list of bias names |
 | `bias_options` | Per-bias knobs (bandwagon `number`, diversity `groups`, compassion-fade `model_names`, …) |
+| `datasets` | Extra datasets for new tasks, `name: file` (JSON list of rows, or JSONL; relative to the config); may also replace a built-in name |
+| `plugins` | Python files (relative to the config) or module names defining new tasks, see [Adding tasks](#adding-tasks) |
+| `tasks` | Declarative pairwise perturbation tasks, no code needed, see [Adding tasks](#adding-tasks) |
 
 `effort` maps to `reasoning_effort` (OpenAI protocol) or `output_config.effort` (Anthropic protocol);
 `null` sends nothing. `params` is passed through verbatim (e.g. `thinking: {type: between_tools}` to turn
@@ -120,7 +123,8 @@ is robust, so inconsistency alone scores 1 − CR). It is the perturbation's own
 inconsistency is taken out: ≈ 0 means the perturbation is indistinguishable from re-sampling, < 0 a bias (or, for
 Fallacy-Oversight, > 0 means the fallacy was noticed beyond chance). `effect_lo` / `effect_hi` is its 95% bootstrap
 interval over dataset rows (so RR and CR are resampled together). In `bias_grid.png` the red dash over each bar is
-that judge's expected RR; `effect_grid.png` shows the effects themselves around a zero line.
+that judge's expected RR; `effect_grid.png` shows the effects themselves around a zero line. CoT has an effect too:
+CoT accuracy − plain-prompt accuracy (its `expected` is the plain prompt's accuracy), with a paired bootstrap interval.
 Perturbations that target one answer always target the rejected one (answer 2), except Fallacy-Oversight and
 Sentiment (answer 1). Dataset rows missing a perturbed field are skipped, not invented.
 
@@ -151,7 +155,8 @@ judgebias/
   llm/            protocol adapters (openai, anthropic, fake), per-run JSONL response cache
   context.py      cached, concurrency-limited `ask` shared by all biases
   data.py, prompts.py, parse.py, metrics.py (metrics + intervals + drift)
-  biases/         one module/registration per panel; registry is `BIASES`
+  biases/         one module per built-in panel (base.py: Bias, BiasResult, Metric, registry `BIASES`); custom.py loads
+                  config `plugins` / `tasks`
   runner.py       judge x bias loop -> results/<timestamp>/
   plot.py         3x4 bias grid, cost vs. metric / Correctness grids, utility plot
   compare.py      several runs side by side (tiered bars)
@@ -210,7 +215,7 @@ Invalid = a verdict/score needed for the comparison could not be parsed (or the 
 | File | Shows |
 |---|---|
 | `bias_grid.png` | the 3×4 grid above: one bar per judge per bias, with its 95% interval; RR panels: a red dash over each bar at that judge's expected RR if the perturbation had no effect (CR, or 1 − CR for Fallacy-Oversight) |
-| `effect_grid.png` | RR panels only: RR − expected RR per judge with its 95% bootstrap interval, around a zero line (below zero = a bias; Fallacy-Oversight: above zero = the fallacy is noticed) |
+| `effect_grid.png` | panels with an expected value (RR panels, CoT): value − expected per judge with its 95% bootstrap interval, around a zero line (RR: below zero = a bias, Fallacy-Oversight: above zero = the fallacy is noticed; CoT: above zero = CoT helps) |
 | `cost_vs_performance.png` | per bias: mean output tokens per call (x, log) vs. that bias's metric (y, with interval) |
 | `correctness_grid.png` | same grid, one bar per judge per bias showing Correctness; bars grouped by judge group, then effort; a red dash over each bar at that judge's Correctness on the unperturbed prompt (CoT: the plain prompt) |
 | `cost_vs_correctness.png` | per bias: mean output tokens per call (x, log) vs. Correctness (y) |
@@ -226,12 +231,13 @@ included), averaged per call. Every call a bias makes counts, cache hits include
 was cached; Self-Enhancement scoring calls are billed to the judge that scored. In the cost plots, the marker shape
 shows the effort and a group's judges are joined by a gray line in effort order.
 
-`summary.csv` columns: `judge`, `group`, `model`, `effort`, `bias`, `metric`, `value`, `value_lo`, `value_hi`,
-then robustness panels only: `cr`, `expected_rr`, `effect`, `effect_lo`, `effect_hi`, `drift`, `drift_lo`,
-`drift_hi`; `n` (dataset rows), `n_invalid`, `samples`, `n_correct`, `n_wrong` (invalid = the rest), `correctness`,
-`base_correctness` (RR and CoT panels), `calls` (calls with a known token count), `out_tokens` (mean output tokens per call),
-`flops`, `flops_scale` (below), `extra` (JSON: CoT's `no_cot_accuracy` and `cot_gain`, Self-Enhancement's `others` and
-`same_model_only`), `code`. Calls whose usage the API did not report are left out of `out_tokens` (a warning is
+`summary.csv` columns: `judge`, `group`, `model`, `effort`, `bias`, `title` (panel title), `metric`, `value`,
+`value_lo`, `value_hi`, `expected`, `effect`, `effect_lo`, `effect_hi` (NaN for tasks without a no-bias reference:
+Self-Enhancement, Refinement-Aware); then each task's own stats (robustness panels: `cr`, `drift`, `drift_lo`,
+`drift_hi`; a plugin task adds its own columns here); `n` (dataset rows), `n_invalid`, `samples`, `n_correct`,
+`n_wrong` (invalid = the rest), `correctness`, `base_correctness` (RR and CoT panels), `calls` (calls with a known
+token count), `out_tokens` (mean output tokens per call), `flops`, `flops_scale` (below), `extra` (JSON:
+Self-Enhancement's `others` and `same_model_only`), `code`. Calls whose usage the API did not report are left out of `out_tokens` (a warning is
 logged), and a judge × bias with no known count is skipped in the cost plots.
 
 **FLOPs (vLLM jobs).** `vllm_job.sh` starts vLLM with `--enable-mfu-metrics`, and `config.vllm.yaml` marks its provider
@@ -250,8 +256,57 @@ logged); judges of other providers have NaN `flops` and are left out of the FLOP
 ## Extending
 
 - **New judge:** one line under `judges`. **New endpoint** speaking either protocol: one `providers` entry + one `.env` variable.
-- **New bias:** write a `variants(row, T, opts)` function and register a `PerturbationBias` in `judgebias/biases/pairwise.py`
-  (or subclass `Bias` for non-pairwise metrics). The runner and plot need no changes.
+- **New task (bias test):** see below. The runner, summary, examples, `check`, `plot` and `compare` need no changes.
+
+### Adding tasks
+
+Every panel is a *task*: a `Bias` with a `name`, `title`, `metric` and an async `evaluate(judge, ctx)` returning a
+`BiasResult` (`judgebias/biases/base.py`). Three ways to add one, from least to most code:
+
+**1. Declarative (config only)** — a pairwise perturbation that shows other fields of the same row. Rows need
+`question`, `answer1` (the better answer) and `answer2`; each variant names the field shown instead of one of them
+(rows lacking it skip that variant) and may show the answers swapped. Measured by Robustness Rate like the built-in
+panels, with CR, expected RR, effect and drift.
+
+```yaml
+datasets:
+  my_set: data/my_set.jsonl          # relative to this config; JSON list or JSONL
+tasks:
+  - name: emoji
+    title: Emoji
+    dataset: my_set                  # or a built-in one (alignment, verbosity, sentiment, ...)
+    variants:
+      - {name: emoji, answer2: answer2_with_emoji}
+      - {name: emoji_first, answer2: answer2_with_emoji, swapped: true}
+    expect_change: false             # true: the perturbation ruins answer 1, so a robust verdict changes
+```
+
+**2. Plugin, pairwise** — a `.py` file listed under `plugins` that builds the variants in code (any prompt, any
+perturbation) and registers a `PerturbationBias`; `prompt=` replaces the unperturbed prompt builder for datasets that
+do not use the paper's pairwise template:
+
+```python
+from judgebias.biases import register
+from judgebias.biases.pairwise import PerturbationBias, Variant, base_prompt
+
+def variants(row, T, opts):  # T = the paper's promptTemplate.py, opts = bias_options.<name>
+    return [Variant("caps", base_prompt(row, T, a2=row["answer2"].upper()))]
+
+register(PerturbationBias("caps", "Caps", "my_set", variants))
+```
+
+**3. Plugin, any metric** — subclass `Bias` and compute whatever the task needs with `ctx.data(name)` (seeded
+subset), `ctx.ask(judge, prompt, repeat)` (cached, rate-limited, billed for the cost plots), `ctx.options(name)`,
+`ctx.judges`. Fill `BiasResult`: `value` with its `ci`, optionally `expected` / `effect` / `effect_ci` (drawn as the
+reference mark and in `effect_grid.png`), `base_correctness`, `stats` (each becomes a summary column), `extra`, and
+one `sample(...)` per judged call (correct / wrong / invalid, for `correctness` and `examples.zip`). A new metric name
+can register its look (`METRICS["gap"] = Metric("gap", "Score gap", bounded=False)`); otherwise it gets a default.
+Override `warnings(judges)` to have `check` report setup problems (e.g. Self-Enhancement's ≥ 2 models).
+
+Figures read panels from `summary.csv` (`bias`, `title`, `metric`), so `plot` / `compare` work on results of a task
+whose plugin is not loaded. A built-in task goes into `judgebias/biases/` and the import line of its `__init__.py`
+(which sets the panel order). The config snapshot a job script takes keeps plugin *paths* (made absolute), not their
+code: editing a plugin before a queued job starts changes that job.
 
 ## Notes
 

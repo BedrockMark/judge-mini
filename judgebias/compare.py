@@ -23,9 +23,8 @@ import pandas as pd
 from matplotlib.colors import to_hex, to_rgb
 from matplotlib.patches import Patch
 
-from .biases import BIASES
 from .config import effort_rank
-from .plot import (ERR_KW, INK, MUTED, PALETTE, Y_LABEL, Judge, _cost_grid, _finish, _kind, _panel_grid, _panels, _ref_handle,
+from .plot import (ERR_KW, INK, MUTED, PALETTE, Judge, _cost_grid, _finish, _panel_grid, _panels, _ref_handles,
                    _references, _style, _ylim, effort_of, interval, tints, yerr)
 from .runner import read_summary
 
@@ -185,13 +184,13 @@ def _bar_grid(df: pd.DataFrame, out: Path, ycol: str, ncols: int) -> Path | None
     models = _models(df)
     colors, layers = _colors(models), tiers(models)
     width = 0.8 / len(models)
-    names = _panels(df, "robustness" if ycol == "effect" else None)
+    names = _panels(df, ycol)
     if not names:
         return None
     fig, panels = _panel_grid(names, ncols)
-    for ax, name in panels:
-        bias = BIASES[name]
-        sub = df[df["bias"] == name].set_index("judge")
+    with_refs = []
+    for ax, panel in panels:
+        sub = df[df["bias"] == panel.name].set_index("judge")
         lo, hi = interval(sub, ycol)
         pick = lambda s, j: float(s[j.label]) if j.label in sub.index else math.nan
         values, placed = [], []
@@ -203,11 +202,13 @@ def _bar_grid(df: pd.DataFrame, out: Path, ycol: str, ncols: int) -> Path | None
                 ax.bar(x, v, width=width, color=colors[j.label],
                        hatch=COPY_HATCH if repeat else None, edgecolor="white", linewidth=1, zorder=2,
                        yerr=yerr([v], [pick(lo, j)], [pick(hi, j)]), error_kw=ERR_KW)
-        refs = _references(ax, sub, bias, ycol, placed, width / 2)
+        refs = _references(ax, sub, ycol, placed, width / 2)
+        if refs:
+            with_refs.append(panel)
         if ycol == "effect":
             ax.axhline(0, color=INK, linewidth=0.8, zorder=1)
-        ax.set_ylim(*_ylim(_kind(bias, ycol), values + refs + [*lo, *hi]))
-        _style(ax, bias.title, Y_LABEL[_kind(bias, ycol)])
+        ax.set_ylim(*_ylim(panel.scale(ycol), values + refs + [*lo, *hi]))
+        _style(ax, panel.title, panel.ylabel(ycol))
         ax.set_xticks(range(len(layers)), [f"T{t + 1}" for t in range(len(layers))])
         ax.set_xlabel("Effort tier (low → high)", fontsize=8, color=MUTED)
 
@@ -215,8 +216,7 @@ def _bar_grid(df: pd.DataFrame, out: Path, ycol: str, ncols: int) -> Path | None
                      label=f"{model}: {' < '.join(j.effort or 'default' for j in members)}")
                for model, members in models.items()]
     handles.append(Patch(facecolor="#c3c2b7", hatch=COPY_HATCH, edgecolor="white", label="highest effort, repeated"))
-    if ref_handle := _ref_handle(ycol):
-        handles.append(ref_handle)
+    handles += _ref_handles(ycol, with_refs)
     return _finish(fig, handles, out, ncol=3)
 
 

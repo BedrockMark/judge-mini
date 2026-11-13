@@ -21,7 +21,9 @@ from judgebias.llm.fake import FakeClient
 from judgebias.llm.openai_proto import OpenAIProtocolClient
 from judgebias.metrics import (accuracy, bootstrap_ci, consistency_pairs, consistency_rate, drift, error_rate, expected_rr,
                                majority, mean_ci, proportion, robustness_rate, wilson)
-from judgebias.runner import SUMMARY_COLUMNS
+from judgebias.runner import SUMMARY_COLUMNS, SUMMARY_HEAD, SUMMARY_TAIL
+
+ROBUSTNESS_STATS = ["cr", "drift", "drift_lo", "drift_hi"]
 from judgebias.parse import parse_rating, parse_verdict
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -343,10 +345,10 @@ def test_cache_prevents_repeat_calls(tmp_path):
 @pytest.mark.parametrize("bias_name", [b for b, x in BIASES.items() if hasattr(x, "variants")])
 def test_variants_build_for_every_dataset_row(bias_name):
     """Full-dataset sweep: no row may crash a variant builder (some rows lack perturbed fields)."""
-    from judgebias.data import load_dataset
+    from judgebias.data import DATASET_FILES, load_dataset
     from judgebias.prompts import load_templates
     bias, T = BIASES[bias_name], load_templates(DATASET)
-    rows = load_dataset(DATASET, bias.dataset)
+    rows = load_dataset(DATASET / DATASET_FILES[bias.dataset])
     built = [bias.variants(r, T, {}) for r in rows]
     assert sum(len(v) > 0 for v in built) >= 0.9 * len(rows)
 
@@ -692,7 +694,8 @@ def test_summary_counts_every_sample(tmp_path):
     out = tmp_path / "out"
     out.mkdir()
     summary = asyncio.run(run(cfg, out))
-    assert list(summary.columns) == SUMMARY_COLUMNS
+    assert list(summary.columns) == SUMMARY_HEAD + ROBUSTNESS_STATS + SUMMARY_TAIL
+    assert set(summary["title"]) == {"Authority", "CoT"}
     s = summary.set_index(["judge", "bias"])
     auth = s.loc[("G (low)", "authority")]
     assert auth["samples"] > auth["n"]  # several perturbations per dataset row, all counted
@@ -701,16 +704,18 @@ def test_summary_counts_every_sample(tmp_path):
     assert s.loc[("G (high)", "cot"), "out_tokens"] > s.loc[("G (low)", "cot"), "out_tokens"]
     assert ((s["value_lo"] <= s["value"]) & (s["value"] <= s["value_hi"])).all()
     robust = s["metric"] == "robustness"
-    for col in ("cr", "expected_rr", "effect", "effect_lo", "effect_hi", "drift", "drift_lo", "drift_hi"):
+    for col in ROBUSTNESS_STATS:
         assert s[col].notna().equals(robust), col
+    for col in ("expected", "effect", "effect_lo", "effect_hi"):  # robustness and CoT have a no-bias reference
+        assert s[col].notna().all(), col
+    assert ((s["effect_lo"] <= s["effect"]) & (s["effect"] <= s["effect_hi"])).all()
+    assert (s["effect"] == s["value"] - s["expected"]).all()
     r = s[robust]
     assert (r["drift"].abs() <= 1).all() and ((r["drift_lo"] <= r["drift"]) & (r["drift"] <= r["drift_hi"])).all()
-    assert (r["expected_rr"] == r["cr"]).all()  # authority: a change is not the robust verdict
-    assert (r["effect"] == r["value"] - r["expected_rr"]).all()
-    assert ((r["effect_lo"] <= r["effect"]) & (r["effect"] <= r["effect_hi"])).all()
+    assert (r["expected"] == r["cr"]).all()  # authority: a change is not the robust verdict
     assert s["base_correctness"].notna().equals(s["metric"].isin(["robustness", "accuracy"]))
-    assert s.loc[("G (low)", "cot"), "base_correctness"] == pytest.approx(
-        json.loads(s.loc[("G (low)", "cot"), "extra"])["no_cot_accuracy"])
+    cot = s.xs("cot", level="bias")
+    assert (cot["expected"] == cot["base_correctness"]).all()  # CoT's reference: the plain prompt's accuracy
 
 
 def test_pairwise_correctness_is_against_the_ground_truth_not_the_unperturbed_verdict():
@@ -744,7 +749,7 @@ def test_fallacy_oversight_effect_is_against_one_minus_cr(tmp_path):
     out = tmp_path / "out"
     out.mkdir()
     s = asyncio.run(run(cfg, out)).set_index("judge")
-    assert (s["expected_rr"] == 1 - s["cr"]).all() and (s["effect"] == s["value"] - s["expected_rr"]).all()
+    assert (s["expected"] == 1 - s["cr"]).all() and (s["effect"] == s["value"] - s["expected"]).all()
     assert (s["base_correctness"] >= 0).all()  # unperturbed repeats scored against answer 1, the original winner
 
 
@@ -928,7 +933,7 @@ def test_no_flop_plots_without_flop_data(tmp_path):
     assert s["flops"].isna().all()
     names = {p.name for p in plot_all(cfg, s, out)}
     assert not any("flops" in n for n in names)
-    assert "effect_grid.png" not in names  # CoT only: no robustness panel to show an effect for
+    assert "effect_grid.png" in names  # CoT's effect: the gain over the plain prompt
 
 
 # --- compare ------------------------------------------------------------------------------------
@@ -937,14 +942,14 @@ def _summary_dir(path: Path, group: str, efforts: list, flops: bool = False, cod
     path.mkdir(parents=True)
     rows = [{"judge": group if e is None else f"{group} ({e})", "group": group, "model": "m", "effort": e,
              "bias": "position", "code": code,
-             "metric": "robustness", "value": 0.8, "value_lo": 0.7, "value_hi": 0.9, "cr": 0.9, "expected_rr": 0.9,
+             "metric": "robustness", "value": 0.8, "value_lo": 0.7, "value_hi": 0.9, "cr": 0.9, "expected": 0.9,
              "effect": -0.1, "effect_lo": -0.3, "effect_hi": 0.1, "drift": 0.1, "drift_lo": -0.1, "drift_hi": 0.3,
              "base_correctness": 0.6, "n": 3,
              "n_invalid": 0, "samples": 3, "n_correct": 2, "n_wrong": 1, "correctness": 0.5 + 0.1 * i, "calls": 3,
              "out_tokens": 100.0 * (i + 1), "flops": 1e12 * (i + 1) if flops else math.nan, "flops_scale": math.nan,
              "extra": "{}"}
             for i, e in enumerate(efforts)]
-    pd.DataFrame(rows, columns=SUMMARY_COLUMNS).to_csv(path / "summary.csv", index=False)
+    pd.DataFrame(rows, columns=SUMMARY_HEAD + ROBUSTNESS_STATS + SUMMARY_TAIL).to_csv(path / "summary.csv", index=False)
     return path
 
 
@@ -1088,3 +1093,137 @@ def test_failed_run_keeps_its_cache_and_a_rerun_in_the_folder_reuses_it(tmp_path
 
     with pytest.raises(FileExistsError):  # results, not just a cache: not a folder to run into
         given_output_dir(out)
+
+
+# --- user-defined tasks -------------------------------------------------------------------------
+
+PLUGIN = '''
+import asyncio
+from judgebias.biases import BiasResult, Metric, METRICS, register, sample
+from judgebias.biases.base import Bias
+from judgebias.metrics import mean_ci
+from judgebias.parse import parse_rating
+
+METRICS["score_gap"] = Metric("score_gap", "Score gap", bounded=False)
+
+
+class LengthGap(Bias):
+    name, title, metric = "length_gap", "Length Gap", "score_gap"
+
+    async def evaluate(self, judge, ctx):
+        rows = ctx.data("mine")
+        outs = await asyncio.gather(*(ctx.ask(judge, ctx.T.get_score(r["question"], r["answer1"])) for r in rows))
+        scores = [parse_rating(o) for o in outs]
+        value, ci = mean_ci([s for s in scores if s is not None])
+        return BiasResult(value=value, ci=ci, n=len(rows), stats={"top": max(s or 0 for s in scores)},
+                          samples=[sample(r["_idx"], "correct" if s else "invalid", "p", "a score", o)
+                                   for r, s, o in zip(rows, scores, outs)])
+
+
+register(LengthGap())
+'''
+
+
+def _custom_config(tmp_path, **extra):
+    import yaml
+    rows = [{"question": f"q{i}", "answer1": f"good {i}", "answer2": f"bad {i}",
+             **({"answer2_loud": f"BAD {i}!!!"} if i % 2 == 0 else {})} for i in range(6)]
+    (tmp_path / "mine.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+    raw = {"dataset_dir": str(DATASET), "env_file": None, "results_dir": "results", "samples_per_bias": 6,
+           "providers": {"fake": {"protocol": "fake"}},
+           "judges": [{"label": "a", "provider": "fake", "model": "m1"}, {"label": "b", "provider": "fake", "model": "m2"}],
+           "datasets": {"mine": "mine.jsonl"},
+           "tasks": [{"name": "loudness", "title": "Loudness", "dataset": "mine",
+                      "variants": [{"name": "loud", "answer2": "answer2_loud"},
+                                   {"name": "loud_first", "answer2": "answer2_loud", "swapped": True}]}],
+           **extra}
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    return path
+
+
+def test_declared_task_runs_on_a_config_dataset_and_plots(tmp_path):
+    from judgebias.plot import plot_all
+    from judgebias.runner import run
+    cfg = load_config(_custom_config(tmp_path, biases=["position", "loudness"]))
+    assert cfg.dataset_path("mine") == tmp_path / "mine.jsonl"
+    assert "loudness" in cfg.selected_biases() and "loudness" in load_config(_custom_config(tmp_path)).selected_biases()
+    bias = BIASES["loudness"]
+    from judgebias.prompts import load_templates
+    row = {"question": "q", "answer1": "FIRST-ANSWER", "answer2": "y", "answer2_loud": "LOUD-ANSWER", "_idx": 0}
+    v = bias.variants(row, load_templates(DATASET), {})
+    assert [x.name for x in v] == ["loud", "loud_first"] and v[1].swapped
+    assert v[1].prompt.index("LOUD-ANSWER") < v[1].prompt.index("FIRST-ANSWER")  # the loud answer is shown first
+    assert bias.variants({**row, "answer2_loud": ""}, load_templates(DATASET), {}) == []  # skipped, not invented
+    out = tmp_path / "out"
+    out.mkdir()
+    s = asyncio.run(run(cfg, out)).set_index(["judge", "bias"])
+    loud = s.loc[("a", "loudness")]
+    assert loud["title"] == "Loudness" and loud["metric"] == "robustness" and loud["n"] == 6
+    assert loud["samples"] == 6  # 3 rows have answer2_loud, two variants each
+    assert not math.isnan(loud["cr"]) and not math.isnan(loud["effect"])
+    names = {p.name for p in plot_all(cfg, s.reset_index(), out)}
+    assert {"bias_grid.png", "effect_grid.png"} <= names
+
+
+def test_plugin_task_with_its_own_metric_and_stats(tmp_path):
+    from judgebias.plot import _panels, plot_all
+    from judgebias.runner import SUMMARY_HEAD, SUMMARY_TAIL, run
+    (tmp_path / "my_plugin.py").write_text(PLUGIN, encoding="utf-8")
+    cfg = load_config(_custom_config(tmp_path, plugins=["my_plugin.py"]))
+    assert cfg.plugins == [str(tmp_path / "my_plugin.py")]
+    assert cfg.selected_biases()[-2:] == ["length_gap", "loudness"]  # all = built-ins, plugins, declared tasks
+    assert load_config(_custom_config(tmp_path, plugins=["my_plugin.py"])).selected_biases()  # loading twice is fine
+    cfg.biases = ["position", "length_gap"]
+    out = tmp_path / "out"
+    out.mkdir()
+    s = asyncio.run(run(cfg, out))
+    assert list(s.columns) == SUMMARY_HEAD + ["cr", "drift", "drift_lo", "drift_hi", "top"] + SUMMARY_TAIL
+    gap = s[s["bias"] == "length_gap"]
+    assert gap["top"].notna().all() and gap["expected"].isna().all() and (gap["metric"] == "score_gap").all()
+    assert [p.title for p in _panels(s)] == ["Position", "Length Gap"]
+    assert [p.name for p in _panels(s, "effect")] == ["position"]  # no expected value, so no effect panel
+    assert (out / "examples.zip").exists() and plot_all(cfg, s, out)
+
+
+def test_summary_of_an_unloaded_task_still_plots(tmp_path):
+    from judgebias.plot import _panels, plot_all
+    rows = [{"judge": j, "group": j, "model": j, "effort": None, "bias": "mystery", "title": "Mystery",
+             "metric": "mystery_metric", "value": v, "value_lo": v - 1, "value_hi": v + 1, "n": 3, "samples": 3,
+             "n_correct": 2, "n_wrong": 1, "correctness": 2 / 3, "calls": 3, "out_tokens": 50.0, "extra": "{}"}
+            for j, v in (("x", 3.0), ("y", 5.0))]
+    s = pd.DataFrame(rows)
+    (panel,) = _panels(s)
+    assert (panel.title, panel.metric.label, panel.scale("value")) == ("Mystery", "Mystery metric", "open")
+    names = {p.name for p in plot_all(make_cfg(tmp_path), s, tmp_path)}
+    assert "bias_grid.png" in names and "effect_grid.png" not in names
+
+
+def test_declared_task_cannot_shadow_a_builtin_or_use_an_unknown_dataset(tmp_path):
+    with pytest.raises(ConfigError, match="clashes"):
+        make_cfg(tmp_path, tasks=[{"name": "position", "dataset": "alignment",
+                                   "variants": [{"name": "v", "answer2": "x"}]}]).selected_biases()
+    with pytest.raises(ConfigError, match="unknown dataset"):
+        make_cfg(tmp_path, tasks=[{"name": "t", "dataset": "nope", "variants": [{"name": "v", "answer2": "x"}]}])
+
+
+def test_snapshot_keeps_datasets_and_plugins_absolute(tmp_path):
+    from judgebias.config import snapshot_config
+    (tmp_path / "my_plugin.py").write_text(PLUGIN, encoding="utf-8")
+    src = _custom_config(tmp_path, plugins=["my_plugin.py"])
+    dest = snapshot_config(src, tmp_path / "elsewhere" / "config.yaml")
+    cfg = load_config(dest)
+    assert cfg.dataset_path("mine") == tmp_path / "mine.jsonl" and cfg.plugins == [str(tmp_path / "my_plugin.py")]
+
+
+def test_old_summaries_read_expected_rr_as_expected(tmp_path):
+    from judgebias.runner import read_summary
+    pd.DataFrame([{"judge": "a", "bias": "position", "expected_rr": 0.9}]).to_csv(tmp_path / "s.csv", index=False)
+    assert read_summary(tmp_path / "s.csv")["expected"].tolist() == [0.9]
+
+
+def test_error_bars_never_negative_at_a_full_share():
+    from judgebias.plot import yerr
+    from judgebias.metrics import wilson
+    lo, hi = wilson(6, 6)
+    assert min(min(side) for side in yerr([1.0], [lo], [hi])) >= 0

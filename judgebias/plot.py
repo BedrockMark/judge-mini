@@ -1,11 +1,12 @@
 """summary.csv -> figures: the 3x4 grids of bias panels (one bar per judge, with its 95% interval) of each bias's
-metric, mirroring the paper's figure, of Correctness, and of the perturbation's effect (RR − expected RR, robustness
-panels only); cost (mean output tokens per call) vs. metric / Correctness
+metric, mirroring the paper's figure, of Correctness, and of the bias's effect (value − expected, for the panels whose
+task reports an expected value: robustness panels and CoT); cost (mean output tokens per call) vs. metric / Correctness
 per bias; and the overall utility plot + table. Runs whose judges were served by our vLLM job also get the two
 per-bias cost grids with FLOPs per call as the cost.
 
-Judges, groups and efforts come from the summary itself (its judge / group / model / effort columns); the config is
-only consulted for a judge's `color`."""
+Everything comes from the summary itself: judges, groups and efforts from its judge / group / model / effort columns,
+panels from its bias / title / metric columns (so a summary of a task whose code is not loaded still plots; its
+metric's look comes from biases.METRICS, or a default). The config is only consulted for a judge's `color`."""
 from __future__ import annotations
 
 import logging
@@ -23,9 +24,10 @@ from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 from matplotlib.ticker import FuncFormatter, NullFormatter, NullLocator
 
-from .biases import BIASES
+from .biases import BIASES, Metric, metric_spec
 from .config import Config, effort_rank
 from .metrics import NAN_CI, wilson
+from .runner import ordered
 
 log = logging.getLogger(__name__)
 
@@ -33,12 +35,10 @@ log = logging.getLogger(__name__)
 PALETTE = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#6250d6", "#e34948"]
 REF_COLOR = "#d62728"
 INK, MUTED, GRID = "#1f1f1d", "#6b6a63", "#e1e0d9"
-Y_LABEL = {"robustness": "Robustness Rate", "accuracy": "Accuracy", "error_rate": "Error Rate (lower is better)",
-           "correctness": "Correctness", "effect": "RR − expected RR"}
-# The dashed reference drawn over each bar: bias grid = the RR a perturbation with no effect would get (CR, or
-# 1 − CR for Fallacy-Oversight); Correctness grid = the unperturbed prompt's Correctness. Error-rate panels have none.
-REF_COL = {"value": "expected_rr", "correctness": "base_correctness"}
-REF_LABEL = {"value": "Expected RR if unbiased (from CR)", "correctness": "Unperturbed prompt"}
+# The dashed reference drawn over each bar where the summary has one: bias grid = the value if the bias had no effect
+# (`expected`; its legend label comes from the panel's Metric); Correctness grid = the unbiased prompt's Correctness.
+REF_COL = {"value": "expected", "correctness": "base_correctness"}
+CORRECTNESS_REF_LABEL = "Unbiased prompt"
 X_LABEL = {"out_tokens": "Mean output tokens / call", "flops": "Mean FLOPs / call (vLLM)"}
 EFFORT_MARKER = {None: "o", "none": "o", "off": "o", "minimal": "v", "low": "s", "medium": "^", "high": "D",
                  "on": "D", "xhigh": "P", "max": "*"}
@@ -98,18 +98,28 @@ def colors_of(judges: list[Judge]) -> dict[str, str]:
     return colors
 
 
-def _kind(bias, ycol: str) -> str:
-    """What a plotted column is, for axis labels and limits: the panel's metric, "correctness" or "effect"."""
-    return bias.metric if ycol == "value" else ycol
+@dataclass(frozen=True)
+class Panel:
+    name: str  # the bias
+    title: str
+    metric: Metric
+
+    def scale(self, ycol: str) -> str:
+        """How a plotted column's y axis is ranged: "effect" (around 0), "bounded" (a 0-1 share) or "open"."""
+        return "effect" if ycol == "effect" else "bounded" if ycol == "correctness" or self.metric.bounded else "open"
+
+    def ylabel(self, ycol: str) -> str:
+        return {"value": self.metric.label, "correctness": "Correctness", "effect": self.metric.effect_label}[ycol]
 
 
-def _ylim(kind: str, values: list[float]) -> tuple[float, float]:
+def _ylim(scale: str, values: list[float]) -> tuple[float, float]:
     finite = [v for v in values if not math.isnan(v)]
     if not finite:
-        return (-0.5, 0.5) if kind == "effect" else (0, 1)
-    if kind == "error_rate":
-        return (0, max(max(finite) * 1.15, 0.02))
-    if kind == "effect":  # symmetric around 0, so a bar's side tells the direction at a glance
+        return (-0.5, 0.5) if scale == "effect" else (0, 1)
+    if scale == "open":
+        lo = min(min(finite) * 1.15, 0.0)
+        return (lo, max(max(finite) * 1.15, lo + 0.02))
+    if scale == "effect":  # symmetric around 0, so a bar's side tells the direction at a glance
         m = max(max(abs(v) for v in finite) * 1.15, 0.1)
         return (-m, m)
     lo = max(0.0, math.floor((min(finite) - 0.05) * 10) / 10)
@@ -120,7 +130,9 @@ def interval(df: pd.DataFrame, ycol: str) -> tuple[pd.Series, pd.Series]:
     """95% interval of ycol per row: the stored ones for the panel metric and for effect, Wilson from the counts for
     Correctness."""
     if ycol in ("value", "effect"):
-        return pd.to_numeric(df[f"{ycol}_lo"], errors="coerce"), pd.to_numeric(df[f"{ycol}_hi"], errors="coerce")
+        nan = pd.Series(math.nan, index=df.index)
+        return (pd.to_numeric(df.get(f"{ycol}_lo", nan), errors="coerce"),
+                pd.to_numeric(df.get(f"{ycol}_hi", nan), errors="coerce"))
     bounds = [wilson(int(k), int(n)) if n > 0 else NAN_CI
               for k, n in zip(pd.to_numeric(df["n_correct"], errors="coerce").fillna(0),
                               pd.to_numeric(df["samples"], errors="coerce").fillna(0))]
@@ -128,18 +140,30 @@ def interval(df: pd.DataFrame, ycol: str) -> tuple[pd.Series, pd.Series]:
 
 
 def yerr(values: list[float], lo: list[float], hi: list[float]) -> list[list[float]]:
-    """matplotlib's asymmetric error bars (NaN -> 0 so the bar still draws)."""
-    down = [0.0 if math.isnan(v) or math.isnan(x) else v - x for v, x in zip(values, lo)]
-    up = [0.0 if math.isnan(v) or math.isnan(x) else x - v for v, x in zip(values, hi)]
+    """matplotlib's asymmetric error bars (NaN -> 0 so the bar still draws; floored at 0, since e.g. a Wilson bound of
+    a 100% share can round to just below the value)."""
+    down = [0.0 if math.isnan(v) or math.isnan(x) else max(v - x, 0.0) for v, x in zip(values, lo)]
+    up = [0.0 if math.isnan(v) or math.isnan(x) else max(x - v, 0.0) for v, x in zip(values, hi)]
     return [down, up]
 
 
-def _panels(summary: pd.DataFrame, metric: str | None = None) -> list[str]:
-    """The biases the summary holds, in registration order; `metric` keeps only the panels of that kind."""
-    return [b for b in BIASES if b in set(summary["bias"]) and (metric is None or BIASES[b].metric == metric)]
+def _panels(summary: pd.DataFrame, ycol: str = "value") -> list[Panel]:
+    """The biases the summary holds that have some `ycol` value (registered ones in registration order, then the rest
+    in order of appearance), each with its title and metric from the summary (else from the registered bias)."""
+    known = pd.to_numeric(summary[ycol], errors="coerce").notna() if ycol in summary else pd.Series(False, summary.index)
+    present = list(dict.fromkeys(summary.loc[known, "bias"]))
+    names = [b for b in BIASES if b in present] + [b for b in present if b not in BIASES]
+    panels = []
+    for name in names:
+        row = summary[summary["bias"] == name].iloc[0]
+        title = row.get("title")
+        if not isinstance(title, str) or not title:
+            title = BIASES[name].title if name in BIASES else name
+        panels.append(Panel(name, title, metric_spec(row["metric"])))
+    return panels
 
 
-def _panel_grid(panels: list[str], ncols: int):
+def _panel_grid(panels: list[Panel], ncols: int):
     nrows = math.ceil(len(panels) / ncols)
     fig, axes = plt.subplots(nrows, ncols, figsize=(3.6 * ncols, 2.6 * nrows + 0.6), squeeze=False)
     for ax in axes.flat[len(panels):]:
@@ -169,11 +193,12 @@ def _finish(fig, handles: list, out: Path, ncol: int = 7) -> Path:
     return out
 
 
-def _references(ax, df: pd.DataFrame, bias, ycol: str, placed: list[tuple[float, Judge]], half_width: float) -> list[float]:
-    """A dashed mark over each bar at that judge's own reference (REF_COL; df indexed by judge): the RR it would get
-    if the perturbation had no effect, or its unperturbed Correctness. Returns the values drawn (for the y range)."""
+def _references(ax, df: pd.DataFrame, ycol: str, placed: list[tuple[float, Judge]], half_width: float) -> list[float]:
+    """A dashed mark over each bar at that judge's own reference (REF_COL; df indexed by judge), where it has one: the
+    value it would get if the bias had no effect, or its Correctness on the unbiased prompt. Returns the values drawn
+    (for the y range)."""
     col = REF_COL.get(ycol)
-    if col is None or col not in df or (ycol == "value" and bias.metric != "robustness"):
+    if col is None or col not in df:
         return []
     refs = pd.to_numeric(df[col], errors="coerce")
     drawn = []
@@ -185,36 +210,43 @@ def _references(ax, df: pd.DataFrame, bias, ycol: str, placed: list[tuple[float,
     return drawn
 
 
-def _ref_handle(ycol: str) -> Line2D | None:
-    return Line2D([0], [0], color=REF_COLOR, linestyle="--", label=REF_LABEL[ycol]) if ycol in REF_LABEL else None
+def _ref_handles(ycol: str, with_refs: list[Panel]) -> list[Line2D]:
+    """Legend entries of the dashed marks: one per distinct label among the panels that drew some."""
+    if not with_refs:
+        return []
+    labels = ([CORRECTNESS_REF_LABEL] if ycol == "correctness"
+              else list(dict.fromkeys(p.metric.ref_label for p in with_refs)))
+    return [Line2D([0], [0], color=REF_COLOR, linestyle="--", label=label) for label in labels]
 
 
 def _bar_grid(summary: pd.DataFrame, judges: list[Judge], colors: dict[str, str], out: Path, ycol: str,
               ncols: int) -> Path | None:
     """One bar (with its 95% interval) per judge per bias panel: ycol "value" = the panel's own metric,
-    "correctness" = Correctness, "effect" = RR − expected RR (robustness panels only, around a zero line). Bars are
-    grouped by judge group, effort ascending within each. None when no panel applies (effect, no robustness bias)."""
-    names = _panels(summary, "robustness" if ycol == "effect" else None)
+    "correctness" = Correctness, "effect" = value − expected (panels whose task has an expected value, around a zero
+    line). Bars are grouped by judge group, effort ascending within each. None when no panel has data."""
+    names = _panels(summary, ycol)
     if not names:
         return None
     fig, panels = _panel_grid(names, ncols)
-    for ax, name in panels:
-        bias = BIASES[name]
-        df = summary[summary["bias"] == name].set_index("judge")
+    with_refs = []
+    for ax, panel in panels:
+        df = summary[summary["bias"] == panel.name].set_index("judge")
         lo, hi = interval(df, ycol)
         pick = lambda s, j: float(s[j.label]) if j.label in df.index else math.nan
         values = [pick(df[ycol], j) for j in judges]
         ax.bar(range(len(judges)), values, width=0.8, color=[colors[j.label] for j in judges], edgecolor="white",
                linewidth=1.5, zorder=2, yerr=yerr(values, [pick(lo, j) for j in judges], [pick(hi, j) for j in judges]),
                error_kw=ERR_KW)
-        refs = _references(ax, df, bias, ycol, list(zip(range(len(judges)), judges)), 0.4)
+        refs = _references(ax, df, ycol, list(zip(range(len(judges)), judges)), 0.4)
+        if refs:
+            with_refs.append(panel)
         if ycol == "effect":
             ax.axhline(0, color=INK, linewidth=0.8, zorder=1)
-        ax.set_ylim(*_ylim(_kind(bias, ycol), values + refs + [*lo, *hi]))
-        _style(ax, bias.title, Y_LABEL[_kind(bias, ycol)])
+        ax.set_ylim(*_ylim(panel.scale(ycol), values + refs + [*lo, *hi]))
+        _style(ax, panel.title, panel.ylabel(ycol))
         ax.set_xticks([])
     handles = [Patch(facecolor=colors[j.label], label=j.label) for j in judges]
-    handles += [h for h in (Line2D([0], [0], color=MUTED, linewidth=0.8, label="95% CI"), _ref_handle(ycol)) if h]
+    handles += [Line2D([0], [0], color=MUTED, linewidth=0.8, label="95% CI"), *_ref_handles(ycol, with_refs)]
     return _finish(fig, handles, out)
 
 
@@ -289,17 +321,16 @@ def _cost_handles(judges: list[Judge], colors: dict[str, str]) -> list:
 def _cost_grid(summary: pd.DataFrame, judges: list[Judge], colors: dict[str, str], out: Path, ycol: str, ncols: int,
                xcol: str = "out_tokens") -> Path:
     fig, panels = _panel_grid(_panels(summary), ncols)
-    for ax, name in panels:
-        bias = BIASES[name]
-        points = _points(summary[summary["bias"] == name].set_index("judge"), ycol, xcol)
-        _style(ax, bias.title, Y_LABEL[_kind(bias, ycol)])
+    for ax, panel in panels:
+        points = _points(summary[summary["bias"] == panel.name].set_index("judge"), ycol, xcol)
+        _style(ax, panel.title, panel.ylabel(ycol))
         ax.set_xlabel(X_LABEL[xcol], fontsize=8, color=MUTED)
         if not points:
             _no_data(ax, "token" if xcol == "out_tokens" else "FLOP")
             continue
         _cost_scatter(ax, judges, colors, points)
         _log_x(ax, [p[0] for p in points.values()])
-        ax.set_ylim(*_ylim(_kind(bias, ycol), [v for p in points.values() for v in p[1:]]))
+        ax.set_ylim(*_ylim(panel.scale(ycol), [v for p in points.values() for v in p[1:]]))
     return _finish(fig, _cost_handles(judges, colors), out)
 
 
@@ -344,13 +375,14 @@ def plot_utility(summary: pd.DataFrame, judges: list[Judge], colors: dict[str, s
         ax.annotate(label, (px, py), xytext=(7, 5), textcoords="offset points", fontsize=8, color=INK)
     _cost_scatter(ax, judges, colors, points)
     _log_x(ax, [p[0] for p in points.values()])
-    ax.set_ylim(*_ylim("correctness", [p[2] for p in points.values()]))
+    ax.set_ylim(*_ylim("bounded", [p[2] for p in points.values()]))
     return _finish(fig, handles, out)
 
 
 def plot_all(cfg: Config, summary: pd.DataFrame, out_dir: Path, ncols: int = 4) -> list[Path]:
     """Every figure for one results folder, plus utility.csv (the numbers behind utility.png). The FLOP versions of
     the two cost grids only when some judge has FLOPs (served by our vLLM job)."""
+    summary = ordered(summary)  # a column the summary lacks (e.g. flops, or a hand-made one) reads as NaN
     judges = judges_of(summary, cfg)
     colors = colors_of(judges)
     table = utility_table(summary)

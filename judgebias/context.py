@@ -60,7 +60,8 @@ class Context:
         return self.cfg.judges
 
     def data(self, name: str) -> list[dict]:
-        return load_dataset(self.cfg.dataset_dir, name, self.cfg.samples_per_bias, self.cfg.seed)
+        """A dataset's seed-fixed subset: a built-in name, or one from config `datasets`."""
+        return load_dataset(self.cfg.dataset_path(name), self.cfg.samples_per_bias, self.cfg.seed)
 
     def options(self, bias: str) -> dict:
         return self.cfg.bias_options.get(bias, {})

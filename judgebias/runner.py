@@ -27,22 +27,23 @@ from .llm import ResponseCache, build_clients
 
 log = logging.getLogger(__name__)
 
-# value / value_lo / value_hi = the panel's metric and its 95% interval (metrics.py). Robustness panels only (NaN
-# otherwise): cr = consistency rate of the unperturbed prompt, expected_rr = the RR a perturbation with no effect
-# would get (cr, or 1 - cr for Fallacy-Oversight), effect = value - expected_rr with its 95% bootstrap interval
-# effect_lo / effect_hi, drift = net share of verdicts that moved from answer 1 to answer 2 under the perturbation
-# (positive = toward answer 2) with drift_lo / drift_hi. n = dataset rows; samples = every judged call classified
-# correct/wrong/invalid (examples/ shows only a few), correctness = n_correct / samples; base_correctness = the same
-# share for the unperturbed prompt (robustness panels; CoT: the plain prompt), NaN for the error-rate panels.
+# Every task's row: title / metric = how its panel is drawn (biases/base.py Metric); value / value_lo / value_hi = the
+# metric and its 95% interval (metrics.py); expected = the value if the bias had no effect (robustness: the RR from
+# the judge's own inconsistency, cr or 1 - cr for Fallacy-Oversight; CoT: the plain prompt's accuracy; NaN for tasks
+# without one), effect = value - expected with its 95% interval effect_lo / effect_hi. Then each task's own `stats`
+# columns (robustness: cr, drift, drift_lo, drift_hi; NaN in other tasks' rows). n = dataset rows; samples = every
+# judged call classified correct/wrong/invalid (examples/ shows only a few), correctness = n_correct / samples;
+# base_correctness = the same share for the unbiased prompt (robustness panels; CoT: the plain prompt).
 # out_tokens = mean output tokens (thinking included) per call, over calls whose
 # usage the API reported (NaN if none). flops = mean FLOPs per call (judges on a `flops` provider only, else NaN):
 # the per-call estimate times flops_scale = vLLM's measured FLOPs over the run / the estimates' sum (NaN if the
 # server's counter could not be read; flops is then the bare estimate). code = the run code of the folder holding
 # this summary (a split's parts and merge: the split's code; a `plot` merge: its own).
-SUMMARY_COLUMNS = ["judge", "group", "model", "effort", "bias", "metric", "value", "value_lo", "value_hi", "cr",
-                   "expected_rr", "effect", "effect_lo", "effect_hi", "drift", "drift_lo", "drift_hi", "n",
-                   "n_invalid", "samples", "n_correct", "n_wrong", "correctness", "base_correctness", "calls",
-                   "out_tokens", "flops", "flops_scale", "extra", "code"]
+SUMMARY_HEAD = ["judge", "group", "model", "effort", "bias", "title", "metric", "value", "value_lo", "value_hi",
+                "expected", "effect", "effect_lo", "effect_hi"]
+SUMMARY_TAIL = ["n", "n_invalid", "samples", "n_correct", "n_wrong", "correctness", "base_correctness", "calls",
+                "out_tokens", "flops", "flops_scale", "extra", "code"]
+SUMMARY_COLUMNS = SUMMARY_HEAD + SUMMARY_TAIL  # always present; task stats go in between
 # A flops_scale outside this range means the estimate and vLLM's counter disagree by more than prefix caching
 # (scale < 1) or retries (scale > 1) explain; the FLOP figures are then not trustworthy.
 FLOPS_SCALE_RANGE = (0.5, 2.0)
@@ -88,14 +89,21 @@ def latest_output_dir(cfg: Config) -> Path:
     return dirs[-1]
 
 
-def read_summary(path: Path) -> pd.DataFrame:
-    return pd.read_csv(path, dtype={"code": str})  # a code like "2e45" must stay text
+def ordered(df: pd.DataFrame) -> pd.DataFrame:
+    """Summary columns in their order: SUMMARY_HEAD, the task stats (any other column), SUMMARY_TAIL."""
+    stats = [c for c in df.columns if c not in SUMMARY_COLUMNS]
+    return df.reindex(columns=SUMMARY_HEAD + stats + SUMMARY_TAIL)
+
+
+def read_summary(path) -> pd.DataFrame:
+    df = pd.read_csv(path, dtype={"code": str})  # a code like "2e45" must stay text
+    return df.rename(columns={"expected_rr": "expected"})  # summaries from before 2026-11-12
 
 
 def merge_summaries(dirs: list[Path]) -> pd.DataFrame:
     """Concatenate several runs' summaries; a later folder's (judge, bias) row replaces an earlier one."""
     df = pd.concat([read_summary(d / "summary.csv") for d in dirs], ignore_index=True)
-    return df.drop_duplicates(["judge", "bias"], keep="last").reset_index(drop=True)
+    return ordered(df.drop_duplicates(["judge", "bias"], keep="last").reset_index(drop=True))
 
 
 def zip_examples(out_dir: Path) -> None:
@@ -156,18 +164,19 @@ async def run(cfg: Config, out_dir: Path, judge_filter: list[str] | None = None,
         current_bias.set(bias_name)  # gather runs each in its own task, so this tags only this pair's calls
         bias = BIASES[bias_name]
         res = await bias.evaluate(judge, ctx)
+        if clash := set(res.stats) & set(SUMMARY_COLUMNS):
+            raise ValueError(f"Bias '{bias_name}' reports stats named like summary columns: {sorted(clash)}")
         write_examples(out_dir / "examples" / bias_name / slug(judge.label), judge, bias, res.samples)
-        log.info("%-28s %-18s %s=%.3f [%.3f, %.3f]%s n=%d invalid=%d", judge.label, bias_name, bias.metric,
-                 res.value, *res.ci,
-                 f" cr={res.cr:.3f} effect={res.effect:+.3f} [{res.effect_ci[0]:+.3f}, {res.effect_ci[1]:+.3f}]"
-                 f" drift={res.drift:+.3f} [{res.drift_ci[0]:+.3f}, {res.drift_ci[1]:+.3f}]"
-                 if bias.metric == "robustness" else "", res.n, res.n_invalid)
+        stats = {"expected": res.expected, "effect": res.effect, **res.stats}
+        log.info("%-28s %-18s %s=%.3f [%.3f, %.3f] %s n=%d invalid=%d", judge.label, bias_name, bias.metric,
+                 res.value, *res.ci, " ".join(f"{k}={v:.3f}" for k, v in stats.items() if not math.isnan(v)),
+                 res.n, res.n_invalid)
         counts = Counter(x["status"] for x in res.samples)
         return {"judge": judge.label, "group": judge.group, "model": judge.model, "effort": judge.effort,
-                "bias": bias_name, "metric": bias.metric, "value": res.value, "value_lo": res.ci[0],
-                "value_hi": res.ci[1], "cr": res.cr, "expected_rr": res.expected_rr, "effect": res.effect,
-                "effect_lo": res.effect_ci[0], "effect_hi": res.effect_ci[1], "drift": res.drift,
-                "drift_lo": res.drift_ci[0], "drift_hi": res.drift_ci[1], "n": res.n, "n_invalid": res.n_invalid,
+                "bias": bias_name, "title": bias.title, "metric": bias.metric, "value": res.value,
+                "value_lo": res.ci[0], "value_hi": res.ci[1], "expected": res.expected, "effect": res.effect,
+                "effect_lo": res.effect_ci[0], "effect_hi": res.effect_ci[1], **res.stats,
+                "n": res.n, "n_invalid": res.n_invalid,
                 "samples": len(res.samples), "n_correct": counts["correct"], "n_wrong": counts["wrong"],
                 "correctness": counts["correct"] / len(res.samples) if res.samples else math.nan,
                 "base_correctness": res.base_correctness,
@@ -199,7 +208,7 @@ async def run(cfg: Config, out_dir: Path, judge_filter: list[str] | None = None,
                         row["judge"], row["bias"], u.calls - u.known, u.calls)
     log.info("API calls: %(api_calls)d, cache hits: %(cache_hits)d, failed calls: %(errors)d, 429s: %(rate_limited)d", ctx.stats)
 
-    summary = pd.DataFrame(rows, columns=SUMMARY_COLUMNS)
+    summary = ordered(pd.DataFrame(rows))
     summary.to_csv(out_dir / "summary.csv", index=False)
     zip_examples(out_dir)
     return summary
