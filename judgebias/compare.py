@@ -281,6 +281,7 @@ def _cost(df: pd.DataFrame, out: Path, ycol: str, ncols: int, xcol: str = "out_t
         x_sd, y_sd = sub["x_sd"].fillna(0), sub["y_sd"].fillna(0)
         _log_x(ax, [v for v in [*sub["x"], *(sub["x"] + x_sd), *(sub["x"] - x_sd)] if v > 0])
         ax.set_ylim(*_ylim(panel.scale(ycol), [*sub["y"], *(sub["y"] + y_sd), *(sub["y"] - y_sd)]))
+    fig.suptitle("Robustness" if ycol == "value" else "Correctness", fontsize=13, color=INK)
     handles = _cost_handles(judges, colors)
     handles[-1].set_label("Same model, effort ↑ (bars: ±1 SD across its runs)")
     return _finish(fig, handles, out, ncol=3)

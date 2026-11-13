@@ -7,6 +7,7 @@
 #   bash vllm_split.sh openai/gpt-oss-120b
 #   JOB_TIME=06:00:00 GPUS=2 bash vllm_split.sh          # vllm_job.sh env vars apply to every part
 #   bash vllm_split.sh openai/gpt-oss-20b --judge "GPT-oss-20b (low)"   # extra args go to every `judgebias run`
+#   bash vllm_split.sh openai/gpt-oss-20b --batch-size 3 # 3 independent splits (own run code each); default 1
 #   bash vllm_split.sh --resume k7m2                     # rerun only the parts of run k7m2 that timed out / failed /
 #   JOB_TIME=12:00:00 bash vllm_split.sh --resume k7m2   #   were cancelled, then merge again (same model, args, env
 #                                                        #   as before unless overridden like here); a rerun part
@@ -35,6 +36,27 @@
 
 set -euo pipefail
 cd "$(dirname "$0")"
+
+# --batch-size N (anywhere in the args, default 1): submit N independent splits of the same model/args/env, each with
+# its own run code. Not with --resume (that reruns one existing split).
+BATCH_SIZE=1 ARGS=()
+while (( $# )); do
+    case $1 in
+        --batch-size) BATCH_SIZE=${2:?--batch-size needs a number}; shift 2 ;;
+        --batch-size=*) BATCH_SIZE=${1#*=}; shift ;;
+        *) ARGS+=("$1"); shift ;;
+    esac
+done
+set -- "${ARGS[@]+"${ARGS[@]}"}"
+[[ $BATCH_SIZE =~ ^[1-9][0-9]*$ ]] || { echo "--batch-size must be a positive integer, got '$BATCH_SIZE'" >&2; exit 1; }
+if (( BATCH_SIZE > 1 )); then
+    [[ ${1:-} != --resume ]] || { echo "--batch-size cannot be combined with --resume" >&2; exit 1; }
+    for ((b = 1; b <= BATCH_SIZE; b++)); do
+        echo "######## batch $b/$BATCH_SIZE"
+        bash "$(basename "$0")" "$@"
+    done
+    exit 0
+fi
 # Notification address: EMAIL=... in .env, passed to the merge job's sbatch as --mail-user (vllm_job.sh does the same for the parts).
 email=$(sed -n 's/^EMAIL=//p' .env 2>/dev/null | tr -d "\r\"'" | tail -1) || true
 # vllm_job.sh settings a resume reuses unless they are set again.
