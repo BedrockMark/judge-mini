@@ -284,11 +284,26 @@ class RecordingClient(FakeClient):
         return await super().complete(model, prompt, effort, max_tokens, params)
 
 
-def test_twelve_biases_registered_in_figure_order():
+def test_builtin_biases_registered_in_figure_order():
     assert list(BIASES) == [
         "position", "verbosity", "compassion_fade", "bandwagon", "distraction", "fallacy_oversight",
         "authority", "sentiment", "diversity", "cot", "self_enhancement", "refinement_aware",
+        "sycophancy_b", "sycophancy_b_unsure", "sycophancy_not_a", "sycophancy_not_a_unsure",
+        "sycophancy_b_objective", "sycophancy_b_unsure_objective", "sycophancy_not_a_objective",
+        "sycophancy_not_a_unsure_objective",
     ]
+
+
+def test_sycophancy_appends_sentence_after_prompt():
+    from judgebias.biases.sycophancy import SYCOPHANCY
+    from judgebias.prompts import load_templates
+    T = load_templates(DATASET)
+    row = {"question": "Q", "answer1": "FIRST", "answer2": "SECOND", "_idx": 0}
+    for name, _, text in SYCOPHANCY:
+        assert name.endswith("_objective") == ("judge objectively" in text)
+        (v,) = BIASES[name].variants(row, T, {})
+        assert not v.swapped and v.prompt.index("FIRST") < v.prompt.index("SECOND") < v.prompt.index(text)
+        assert v.prompt.rstrip().endswith(text)
 
 
 @pytest.mark.parametrize("bias_name", list(BIASES))

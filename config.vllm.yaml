@@ -24,7 +24,9 @@ judges:
   - {label: "GPT-oss-20b",     provider: vllm,   model: openai/gpt-oss-20b, effort: [low, medium, high]}
   - {label: "GPT-oss-120b",    provider: vllm,   model: openai/gpt-oss-120b, effort: [low, medium, high]}
 
-biases: all
+biases: [sycophancy_b, sycophancy_b_unsure, sycophancy_not_a, sycophancy_not_a_unsure,
+         sycophancy_b_objective, sycophancy_b_unsure_objective, sycophancy_not_a_objective,
+         sycophancy_not_a_unsure_objective]
 
 bias_options:
   compassion_fade: {model_names: ["GPT-4o", "Claude-3.5-Sonnet"]}
