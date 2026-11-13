@@ -38,12 +38,11 @@ uv run pytest                                           # tests (no API calls)
   path or a name under `results_dir` — or a run code. Only `summary.csv` is needed: at the top, inside one wrapping
   folder, or, for a `vllm_split.sh` folder not merged yet, its `part*/` summaries (a later part wins; missing parts are
   warned about). Each (folder, group) is one model, named `group [run code]` when two folders share a group (the code
-  is the `code` column of `summary.csv`). In `bias_grid.png` and `correctness_grid.png` the bars are clustered by
-  effort tier: each model's efforts, low to high, fill T1, T2, … and a model with fewer efforts repeats its highest one
-  upward (hatched). E.g. A `off/on` with B `low/medium/high` gives T1 = A off, B low; T2 = A on, B medium; T3 = A on
-  (repeated), B high. The cost figures pool a group's runs into one model, `group [code, code, …]`: each effort's point is
-  the mean cost and metric across those runs, with ±1 SD bars (none for a single run); a model without FLOPs is left
-  out of the `_flops` ones.
+  is the `code` column of `summary.csv`). Every figure pools a group's runs into one model, `group [code, code, …]`.
+  In `bias_grid.png`, `effect_grid.png` and `correctness_grid.png` the bars are clustered by thinking level (effort, low
+  to high), one bar per model in each: the mean across its runs, with ±1 SD bars (none for a single run) and the mean
+  of the runs' references as the red dashed mark. In the cost figures each effort's point is the mean cost and metric
+  across those runs, with ±1 SD bars both ways; a model without FLOPs is left out of the `_flops` ones.
 - Offline dry run with fake judges (no keys, no cost): `uv run python -m judgebias run --config config.fake.yaml`.
 
 ### `check`
@@ -174,7 +173,7 @@ judgebias/
                   config `plugins` / `tasks`
   runner.py       judge x bias loop -> results/<timestamp>/
   plot.py         bias grid (4 per row), cost vs. metric / Correctness grids, utility plot
-  compare.py      several runs side by side (tiered bars)
+  compare.py      several runs side by side (runs pooled per model)
 tests/            pytest suite (no network)
 ```
 

@@ -4,40 +4,36 @@ A source is a folder or a zip (e.g. from `python -m judgebias get`) holding one 
 single wrapping subfolder, or a vllm_split.sh folder not merged yet, whose part<i>/ summaries are merged (a later
 part winning on the same judge x bias).
 
-Each (source, group) is one model; a group in several sources is told apart by the run code its summary.csv records.
-In the two bar grids, bars are clustered by effort tier: a model's efforts, sorted low to high, fill tiers 1, 2, ...
-from the bottom, and a model with fewer efforts repeats its highest one in the upper tiers (hatched bars). E.g. A
-{none, high} and B {low, medium, high} give tiers [A none, B low], [A high, B medium], [A high (repeat), B high]. The
-cost grids (output tokens, and FLOPs for vLLM-served judges) instead pool a group's runs into one model, named
-"<group> [<run codes>]": per effort, the mean cost and metric across its runs, with ±1 SD bars."""
+Each (source, group) is one run of a model; a group in several sources is told apart by the run code its summary.csv
+records. Every figure pools a group's runs into one model, named "<group> [<run codes>]": per effort (thinking level),
+the mean across its runs, with ±1 SD bars (none for a single run). The three bar grids cluster the bars by effort, low
+to high, one bar per model in each, with the mean of the runs' references as the dashed mark; the cost grids (output
+tokens, and FLOPs for vLLM-served judges) plot the mean cost against the mean metric."""
 from __future__ import annotations
 
 import logging
 import math
 import re
 import zipfile
-from colorsys import hls_to_rgb, rgb_to_hls
 from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 
 import pandas as pd
-from matplotlib.colors import to_hex, to_rgb
+from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 
 from .config import effort_rank
-from .plot import (EFFORT_MARKER, ERR_KW, GRID, INK, MUTED, PALETTE, X_LABEL, Judge, _cost_handles, _finish, _log_x,
-                   _no_data, _panel_grid, _panels, _ref_handles, _references, _style, _ylim, effort_of, groups_of,
-                   interval, tints, yerr)
+from .plot import (EFFORT_MARKER, ERR_KW, GRID, INK, MUTED, PALETTE, REF_COL, X_LABEL, Judge, _cost_handles, _finish,
+                   _log_x, _no_data, _panel_grid, _panels, _ref_handles, _references, _style, _ylim, effort_of,
+                   groups_of, tints)
 from .runner import read_summary
 
 log = logging.getLogger(__name__)
 
-COPY_HATCH = "////"
 MAX_DEPTH = 3  # how deep below a source to look for summary.csv
 PART_RE = re.compile(r"part(\d+)")
 SIZE_RE = re.compile(r"(.*[-_ /])(\d+(?:\.\d+)?)[bB]")  # a group ending in a parameter count, e.g. "GPT-oss-20b"
-# Spread of the run variants within one group's hue: +-hue (of a full turn), and lightness from darker to lighter.
-RUN_HUE_SPREAD, RUN_LIGHT_SPREAD = 0.06, 0.32
+FIG_TITLE = {"value": "Robustness", "effect": "Bias effect (value − expected)", "correctness": "Correctness"}
 
 
 def _listing(src: Path) -> tuple[set[PurePosixPath], callable]:
@@ -124,47 +120,6 @@ def _name_key(group: str) -> tuple:
     return (m[1], float(m[2])) if m else (group, -1.0)
 
 
-def _models(df: pd.DataFrame) -> dict[str, list[Judge]]:
-    """{model: its judges low to high effort}, models sorted by group (see _name_key; models sharing one by their
-    full name, i.e. by run code, so the order is fixed)."""
-    models: dict[str, list[Judge]] = {}
-    order = sorted(dict.fromkeys(zip(df["kind"], df["model"])), key=lambda km: (_name_key(km[0]), km[1]))
-    for kind, model in order:
-        sub = df[df["model"] == model]
-        seen = list(dict.fromkeys(effort_of(e) for e in sub["effort"]))  # an empty cell reads back as NaN
-        efforts = sorted(seen, key=lambda e: (effort_rank(e), seen.index(e)))
-        models[model] = [Judge(model if e is None else f"{model} ({e})", model, model, e, kind=kind) for e in efforts]
-    return models
-
-
-def _variant(color: str, k: int, n: int) -> str:
-    """The k-th of n variants of a hue (a group's runs): hue nudged and lightness stepped, darker to lighter."""
-    if n == 1:
-        return color
-    h, l, s = rgb_to_hls(*to_rgb(color))
-    x = k / (n - 1) - 0.5  # -0.5 .. 0.5
-    return to_hex(hls_to_rgb((h + 2 * RUN_HUE_SPREAD * x) % 1, min(max(l + RUN_LIGHT_SPREAD * x, 0.2), 0.75), s))
-
-
-def _colors(models: dict[str, list[Judge]]) -> dict[str, str]:
-    """Each kind (a group as its run named it) gets one hue, its runs variants of it (_variant), and each run's efforts
-    tints of that variant (lowest lightest), as in the single-run figures."""
-    kinds: dict[str, list] = {}
-    for members in models.values():
-        kinds.setdefault(members[0].kind, []).append(members)
-    colors = {}
-    for i, runs in enumerate(kinds.values()):
-        for r, members in enumerate(runs):
-            colors.update(tints(members, _variant(PALETTE[i % len(PALETTE)], r, len(runs))))
-    return colors
-
-
-def tiers(models: dict[str, list[Judge]]) -> list[list[tuple[Judge, bool]]]:
-    """tiers[t] = [(judge, is_repeat) per model]: bottom-aligned, a model's highest effort repeated upward."""
-    n = max(len(m) for m in models.values())
-    return [[(m[min(t, len(m) - 1)], t >= len(m)) for m in models.values()] for t in range(n)]
-
-
 def _with_data(df: pd.DataFrame, cols: list[str], out: Path) -> pd.DataFrame:
     """Only models with some row where all `cols` are known (e.g. FLOPs exist for vLLM-served judges only; a summary
     from before a column existed has none)."""
@@ -179,70 +134,76 @@ def _with_data(df: pd.DataFrame, cols: list[str], out: Path) -> pd.DataFrame:
     return df[df["model"].isin(keep)]
 
 
-def _bar_grid(df: pd.DataFrame, out: Path, ycol: str, ncols: int) -> Path | None:
-    df = _with_data(df, [ycol], out)
-    if df.empty:
-        return None
-    models = _models(df)
-    colors, layers = _colors(models), tiers(models)
-    width = 0.8 / len(models)
-    names = _panels(df, ycol)
-    if not names:
-        return None
-    fig, panels = _panel_grid(names, ncols)
-    with_refs = []
-    for ax, panel in panels:
-        sub = df[df["bias"] == panel.name].set_index("judge")
-        lo, hi = interval(sub, ycol)
-        pick = lambda s, j: float(s[j.label]) if j.label in sub.index else math.nan
-        values, placed = [], []
-        for t, tier in enumerate(layers):
-            for k, (j, repeat) in enumerate(tier):
-                v, x = pick(sub[ycol], j), t - 0.4 + width * (k + 0.5)
-                values.append(v)
-                placed.append((x, j))
-                ax.bar(x, v, width=width, color=colors[j.label],
-                       hatch=COPY_HATCH if repeat else None, edgecolor="white", linewidth=1, zorder=2,
-                       yerr=yerr([v], [pick(lo, j)], [pick(hi, j)]), error_kw=ERR_KW)
-        refs = _references(ax, sub, ycol, placed, width / 2)
-        if refs:
-            with_refs.append(panel)
-        if ycol == "effect":
-            ax.axhline(0, color=INK, linewidth=0.8, zorder=1)
-        ax.set_ylim(*_ylim(panel.scale(ycol), values + refs + [*lo, *hi]))
-        _style(ax, panel.title, panel.ylabel(ycol))
-        ax.set_xticks(range(len(layers)), [f"T{t + 1}" for t in range(len(layers))])
-        ax.set_xlabel("Effort tier (low → high)", fontsize=8, color=MUTED)
-
-    handles = [Patch(facecolor=colors[members[-1].label],
-                     label=f"{model}: {' < '.join(j.effort or 'default' for j in members)}")
-               for model, members in models.items()]
-    handles.append(Patch(facecolor="#c3c2b7", hatch=COPY_HATCH, edgecolor="white", label="highest effort, repeated"))
-    handles += _ref_handles(ycol, with_refs)
-    return _finish(fig, handles, out, ncol=3)
-
-
-def _pooled(df: pd.DataFrame, ycol: str, xcol: str) -> tuple[pd.DataFrame, list[Judge], dict[str, str]]:
+def _pooled(df: pd.DataFrame, ycol: str, xcol: str | None = None
+            ) -> tuple[pd.DataFrame, list[Judge], dict[str, str]]:
     """Each group's runs pooled into one model "<group> [<its run codes>]" (just "<group>" without codes): per effort
-    and bias, the mean and SD (across runs; NaN for one run) of cost (x) and ycol (y), from rows where both are known
-    (the same run given twice counts once). Returns (that frame, a row per judge x bias; the judges, groups in name
-    order and efforts low to high; their colors, one hue per group, efforts tints of it)."""
-    df = df.assign(x=pd.to_numeric(df[xcol], errors="coerce"), y=pd.to_numeric(df[ycol], errors="coerce"),
-                   eff=[effort_of(e) or "" for e in df["effort"]])
-    df = df[(df["x"] > 0) & df["y"].notna()].drop_duplicates(["kind", "code", "eff", "bias"])
+    and bias, the mean and SD (across runs; NaN for one run) of ycol (y) and, if given, of cost (x), and the mean of
+    ycol's reference (ref, see plot.REF_COL) where the summary has one; from rows where y (and x) are known, the same
+    run given twice counting once. Returns (that frame, a row per judge x bias; the judges, groups in name order and
+    efforts low to high; their colors, one hue per group, efforts tints of it)."""
+    df = df.assign(y=pd.to_numeric(df[ycol], errors="coerce"), eff=[effort_of(e) or "" for e in df["effort"]])
+    agg = {"y": ("y", "mean"), "y_sd": ("y", "std")}
+    if xcol:
+        df = df.assign(x=pd.to_numeric(df[xcol], errors="coerce"))
+        df = df[df["x"] > 0]
+        agg |= {"x": ("x", "mean"), "x_sd": ("x", "std")}
+    if REF_COL.get(ycol) in df:
+        df = df.assign(ref=pd.to_numeric(df[REF_COL[ycol]], errors="coerce"))
+        agg["ref"] = ("ref", "mean")
+    df = df[df["y"].notna()].drop_duplicates(["kind", "code", "eff", "bias"])
     codes = df.dropna(subset=["code"]).groupby("kind")["code"].agg(lambda c: sorted(set(c)))
     name = {k: f"{k} [{', '.join(codes[k])}]" if k in codes else k for k in df["kind"].unique()}
-    pooled = (df.groupby(["kind", "eff", "bias"])
-              .agg(x=("x", "mean"), y=("y", "mean"), x_sd=("x", "std"), y_sd=("y", "std")).reset_index())
+    pooled = df.groupby(["kind", "eff", "bias"]).agg(**agg).reset_index()
     pooled["judge"] = [f"{name[k]} ({e})" if e else name[k] for k, e in zip(pooled["kind"], pooled["eff"])]
     judges, colors = [], {}
     for i, kind in enumerate(sorted(name, key=_name_key)):
-        efforts = sorted(set(pooled.loc[pooled["kind"] == kind, "eff"]), key=lambda e: effort_rank(e or None))
+        efforts = sorted(set(pooled.loc[pooled["kind"] == kind, "eff"]), key=lambda e: (effort_rank(e or None), e))
         members = [Judge(f"{name[kind]} ({e})" if e else name[kind], name[kind], name[kind], e or None, kind=kind)
                    for e in efforts]
         judges += members
         colors.update(tints(members, PALETTE[i % len(PALETTE)]))
     return pooled, judges, colors
+
+
+def _bar_grid(df: pd.DataFrame, out: Path, ycol: str, ncols: int) -> Path | None:
+    """One bar per model and effort (_pooled: the mean across its runs, ±1 SD), clustered by effort low to high, the
+    models in name order within each cluster; the dashed mark is the mean of the runs' references."""
+    df = _with_data(df, [ycol], out)
+    if df.empty:
+        return None
+    names = _panels(df, ycol)
+    if not names:
+        return None
+    pooled, judges, colors = _pooled(df, ycol)
+    models = groups_of(judges)
+    efforts = sorted({j.effort or "" for j in judges}, key=lambda e: (effort_rank(e or None), e))
+    width = 0.8 / len(models)
+    slot = {j.label: (efforts.index(j.effort or "") - 0.4 + width * (k + 0.5), j)
+            for k, members in enumerate(models.values()) for j in members}
+    fig, panels = _panel_grid(names, ncols)
+    with_refs = []
+    for ax, panel in panels:
+        sub = pooled[pooled["bias"] == panel.name].set_index("judge")
+        placed = [slot[label] for label in sub.index]
+        sd = sub["y_sd"].fillna(0)
+        for x, j in placed:  # a single run (SD NaN): no error bar
+            ax.bar(x, sub.at[j.label, "y"], width=width, color=colors[j.label], edgecolor="white", linewidth=1,
+                   zorder=2, yerr=None if math.isnan(sub.at[j.label, "y_sd"]) else sd[j.label], error_kw=ERR_KW)
+        refs = _references(ax, sub.rename(columns={"ref": REF_COL.get(ycol, "ref")}), ycol, placed, width / 2)
+        if refs:
+            with_refs.append(panel)
+        if ycol == "effect":
+            ax.axhline(0, color=INK, linewidth=0.8, zorder=1)
+        ax.set_ylim(*_ylim(panel.scale(ycol), [*sub["y"], *(sub["y"] + sd), *(sub["y"] - sd), *refs]))
+        _style(ax, panel.title, panel.ylabel(ycol))
+        ax.set_xticks(range(len(efforts)), [e or "default" for e in efforts])
+        ax.set_xlabel("Thinking level (low → high)", fontsize=8, color=MUTED)
+    fig.suptitle(f"{FIG_TITLE[ycol]} per model and thinking level (mean across runs)", fontsize=13, color=INK)
+    handles = [Patch(facecolor=colors[members[-1].label],
+                     label=f"{model}: {' < '.join(j.effort or 'default' for j in members)}")
+               for model, members in models.items()]
+    handles += [Line2D([0], [0], color=MUTED, linewidth=0.8, label="±1 SD across runs"), *_ref_handles(ycol, with_refs)]
+    return _finish(fig, handles, out, ncol=3)
 
 
 def _sd_scatter(ax, judges: list[Judge], colors: dict[str, str], df: pd.DataFrame) -> None:
@@ -281,7 +242,8 @@ def _cost(df: pd.DataFrame, out: Path, ycol: str, ncols: int, xcol: str = "out_t
         x_sd, y_sd = sub["x_sd"].fillna(0), sub["y_sd"].fillna(0)
         _log_x(ax, [v for v in [*sub["x"], *(sub["x"] + x_sd), *(sub["x"] - x_sd)] if v > 0])
         ax.set_ylim(*_ylim(panel.scale(ycol), [*sub["y"], *(sub["y"] + y_sd), *(sub["y"] - y_sd)]))
-    fig.suptitle("Robustness" if ycol == "value" else "Correctness", fontsize=13, color=INK)
+    fig.suptitle(f"{FIG_TITLE[ycol]} vs. cost per model and thinking level (mean across runs)", fontsize=13,
+                 color=INK)
     handles = _cost_handles(judges, colors)
     handles[-1].set_label("Same model, effort ↑ (bars: ±1 SD across its runs)")
     return _finish(fig, handles, out, ncol=3)
