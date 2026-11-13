@@ -1035,6 +1035,21 @@ def test_compare_names_shared_groups_by_run_code_and_skips_missing_data(tmp_path
     assert "effect_grid.png" not in {p.name for p in (tmp_path / "cmp3").glob("*.png")}
 
 
+def test_compare_cost_pools_a_groups_runs_with_sd(tmp_path):
+    from judgebias.compare import _pooled, load_runs
+    a = _summary_dir(tmp_path / "r1", "G", ["low", "high"], code="zz11")
+    b = _summary_dir(tmp_path / "r2", "G", ["low"], code="aa22")
+    pd.read_csv(b / "summary.csv").assign(out_tokens=300.0).to_csv(b / "summary.csv", index=False)
+    h = _summary_dir(tmp_path / "r3", "H", ["low"], code="h2jk")
+    pooled, judges, colors = _pooled(load_runs([a, b, h, a]), "value", "out_tokens")  # a twice: counted once
+    assert [j.label for j in judges] == ["G [aa22, zz11] (low)", "G [aa22, zz11] (high)", "H [h2jk] (low)"]
+    low = pooled.set_index("judge").loc["G [aa22, zz11] (low)"]
+    assert (low["x"], low["y"], low["y_sd"]) == (200.0, 0.8, 0.0)
+    assert low["x_sd"] == pytest.approx(math.sqrt(2) * 100)
+    assert pooled.set_index("judge")["x_sd"].isna().sum() == 2  # one run each: no SD
+    assert len(set(colors.values())) == 3
+
+
 def test_compare_reads_split_folders_and_export_zips(tmp_path, caplog):
     import zipfile
     from judgebias.compare import load_runs, read_source, summary_paths

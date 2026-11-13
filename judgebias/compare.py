@@ -8,7 +8,8 @@ Each (source, group) is one model; a group in several sources is told apart by t
 In the two bar grids, bars are clustered by effort tier: a model's efforts, sorted low to high, fill tiers 1, 2, ...
 from the bottom, and a model with fewer efforts repeats its highest one in the upper tiers (hatched bars). E.g. A
 {none, high} and B {low, medium, high} give tiers [A none, B low], [A high, B medium], [A high (repeat), B high]. The
-cost grids (output tokens, and FLOPs for vLLM-served judges) overlay every model's judges in one scatter per bias."""
+cost grids (output tokens, and FLOPs for vLLM-served judges) instead pool a group's runs into one model, named
+"<group> [<run codes>]": per effort, the mean cost and metric across its runs, with ±1 SD bars."""
 from __future__ import annotations
 
 import logging
@@ -24,8 +25,9 @@ from matplotlib.colors import to_hex, to_rgb
 from matplotlib.patches import Patch
 
 from .config import effort_rank
-from .plot import (ERR_KW, INK, MUTED, PALETTE, Judge, _cost_grid, _finish, _panel_grid, _panels, _ref_handles,
-                   _references, _style, _ylim, effort_of, interval, tints, yerr)
+from .plot import (EFFORT_MARKER, ERR_KW, GRID, INK, MUTED, PALETTE, X_LABEL, Judge, _cost_handles, _finish, _log_x,
+                   _no_data, _panel_grid, _panels, _ref_handles, _references, _style, _ylim, effort_of, groups_of,
+                   interval, tints, yerr)
 from .runner import read_summary
 
 log = logging.getLogger(__name__)
@@ -220,14 +222,68 @@ def _bar_grid(df: pd.DataFrame, out: Path, ycol: str, ncols: int) -> Path | None
     return _finish(fig, handles, out, ncol=3)
 
 
+def _pooled(df: pd.DataFrame, ycol: str, xcol: str) -> tuple[pd.DataFrame, list[Judge], dict[str, str]]:
+    """Each group's runs pooled into one model "<group> [<its run codes>]" (just "<group>" without codes): per effort
+    and bias, the mean and SD (across runs; NaN for one run) of cost (x) and ycol (y), from rows where both are known
+    (the same run given twice counts once). Returns (that frame, a row per judge x bias; the judges, groups in name
+    order and efforts low to high; their colors, one hue per group, efforts tints of it)."""
+    df = df.assign(x=pd.to_numeric(df[xcol], errors="coerce"), y=pd.to_numeric(df[ycol], errors="coerce"),
+                   eff=[effort_of(e) or "" for e in df["effort"]])
+    df = df[(df["x"] > 0) & df["y"].notna()].drop_duplicates(["kind", "code", "eff", "bias"])
+    codes = df.dropna(subset=["code"]).groupby("kind")["code"].agg(lambda c: sorted(set(c)))
+    name = {k: f"{k} [{', '.join(codes[k])}]" if k in codes else k for k in df["kind"].unique()}
+    pooled = (df.groupby(["kind", "eff", "bias"])
+              .agg(x=("x", "mean"), y=("y", "mean"), x_sd=("x", "std"), y_sd=("y", "std")).reset_index())
+    pooled["judge"] = [f"{name[k]} ({e})" if e else name[k] for k, e in zip(pooled["kind"], pooled["eff"])]
+    judges, colors = [], {}
+    for i, kind in enumerate(sorted(name, key=_name_key)):
+        efforts = sorted(set(pooled.loc[pooled["kind"] == kind, "eff"]), key=lambda e: effort_rank(e or None))
+        members = [Judge(f"{name[kind]} ({e})" if e else name[kind], name[kind], name[kind], e or None, kind=kind)
+                   for e in efforts]
+        judges += members
+        colors.update(tints(members, PALETTE[i % len(PALETTE)]))
+    return pooled, judges, colors
+
+
+def _sd_scatter(ax, judges: list[Judge], colors: dict[str, str], df: pd.DataFrame) -> None:
+    """As plot._cost_scatter, with ±1 SD bars both ways (df: _pooled's rows of one bias, indexed by judge)."""
+    present = [j for j in judges if j.label in df.index]
+    for members in groups_of(present).values():
+        if len(members) >= 2:
+            labels = [j.label for j in members]
+            ax.plot(df.loc[labels, "x"], df.loc[labels, "y"], color=MUTED, linewidth=1.2, alpha=0.7, zorder=2)
+    for j in present:
+        r = df.loc[j.label]
+        ax.errorbar(r["x"], r["y"], xerr=0 if math.isnan(r["x_sd"]) else r["x_sd"],
+                    yerr=0 if math.isnan(r["y_sd"]) else r["y_sd"], color=colors[j.label], elinewidth=0.8,
+                    capsize=2, linestyle="none", alpha=0.6, zorder=2)
+        ax.plot(r["x"], r["y"], marker=EFFORT_MARKER.get(j.effort, "o"), markersize=7, color=colors[j.label],
+                markeredgecolor="white", markeredgewidth=1.5, linestyle="none", zorder=3)
+    ax.grid(axis="x", color=GRID, linewidth=0.6, zorder=0)
+
+
 def _cost(df: pd.DataFrame, out: Path, ycol: str, ncols: int, xcol: str = "out_tokens") -> Path | None:
-    """xcol = "out_tokens" (mean output tokens / call) or "flops" (mean FLOPs / call, vLLM-served judges only)."""
+    """xcol = "out_tokens" (mean output tokens / call) or "flops" (mean FLOPs / call, vLLM-served judges only); a
+    group's runs pooled into one model (_pooled)."""
     df = _with_data(df, [ycol, xcol], out)
     if df.empty:
         return None
-    models = _models(df)
-    judges = [j for members in models.values() for j in members]
-    return _cost_grid(df, judges, _colors(models), out, ycol, ncols, xcol)
+    pooled, judges, colors = _pooled(df, ycol, xcol)
+    fig, panels = _panel_grid(_panels(df), ncols)
+    for ax, panel in panels:
+        sub = pooled[pooled["bias"] == panel.name].set_index("judge")
+        _style(ax, panel.title, panel.ylabel(ycol))
+        ax.set_xlabel(X_LABEL[xcol], fontsize=8, color=MUTED)
+        if sub.empty:
+            _no_data(ax, "token" if xcol == "out_tokens" else "FLOP")
+            continue
+        _sd_scatter(ax, judges, colors, sub)
+        x_sd, y_sd = sub["x_sd"].fillna(0), sub["y_sd"].fillna(0)
+        _log_x(ax, [v for v in [*sub["x"], *(sub["x"] + x_sd), *(sub["x"] - x_sd)] if v > 0])
+        ax.set_ylim(*_ylim(panel.scale(ycol), [*sub["y"], *(sub["y"] + y_sd), *(sub["y"] - y_sd)]))
+    handles = _cost_handles(judges, colors)
+    handles[-1].set_label("Same model, effort ↑ (bars: ±1 SD across its runs)")
+    return _finish(fig, handles, out, ncol=3)
 
 
 def compare_all(sources: list[Path], out_dir: Path, ncols: int = 4) -> list[Path]:

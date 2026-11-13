@@ -41,7 +41,9 @@ uv run pytest                                           # tests (no API calls)
   is the `code` column of `summary.csv`). In `bias_grid.png` and `correctness_grid.png` the bars are clustered by
   effort tier: each model's efforts, low to high, fill T1, T2, … and a model with fewer efforts repeats its highest one
   upward (hatched). E.g. A `off/on` with B `low/medium/high` gives T1 = A off, B low; T2 = A on, B medium; T3 = A on
-  (repeated), B high. The cost figures overlay all judges; a model without FLOPs is left out of the `_flops` ones.
+  (repeated), B high. The cost figures pool a group's runs into one model, `group [code, code, …]`: each effort's point is
+  the mean cost and metric across those runs, with ±1 SD bars (none for a single run); a model without FLOPs is left
+  out of the `_flops` ones.
 - Offline dry run with fake judges (no keys, no cost): `uv run python -m judgebias run --config config.fake.yaml`.
 
 ### `check`
